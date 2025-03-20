@@ -2,3 +2,6 @@ __pycache__
 outputs/
 venv/
 .DS_Store
+*.epub
+*.txt
+*.wav
