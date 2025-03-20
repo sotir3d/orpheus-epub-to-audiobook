@@ -7,3 +7,7 @@ snac>=1.2.1
 ebooklib 
 beautifulsoup4 
 html2text
+PySide6
+pydub 
+requests 
+sounddevice

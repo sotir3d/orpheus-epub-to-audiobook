@@ -20,10 +20,15 @@ A lightweight client for running [Orpheus TTS](https://huggingface.co/canopylabs
    python3 -m venv venv
    source venv/bin/activate
    pip install -r requirements.txt
+
+   pip install --pre torch --index-url https://download.pytorch.org/whl/nightly/cu121
    ```
 6. Run the script:
    ```
-   python gguf_orpheus.py --text "Hello, this is a test" --voice tara
+   python epub_to_speech.py --text "Hello, this is a test" --voice tara
+   ```
+   ```
+   python epub_to_speech_ui.py
    ```
 
 ## Usage
