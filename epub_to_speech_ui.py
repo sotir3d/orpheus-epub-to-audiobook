@@ -164,18 +164,21 @@ class MainWindow(QMainWindow):
         self.temp_spin = QDoubleSpinBox()
         self.temp_spin.setRange(0.1, 2.0)
         self.temp_spin.setValue(epub_to_speech.TEMPERATURE)
+        self.temp_spin.setSingleStep(0.01)
         param_layout.addWidget(self.temp_spin)
 
         param_layout.addWidget(QLabel("Top P:"))
         self.top_p_spin = QDoubleSpinBox()
         self.top_p_spin.setRange(0.1, 1.0)
         self.top_p_spin.setValue(epub_to_speech.TOP_P)
+        self.top_p_spin.setSingleStep(0.01)
         param_layout.addWidget(self.top_p_spin)
 
         param_layout.addWidget(QLabel("Rep. Penalty:"))
         self.rep_penalty_spin = QDoubleSpinBox()
         self.rep_penalty_spin.setRange(1.0, 2.0)
         self.rep_penalty_spin.setValue(epub_to_speech.REPETITION_PENALTY)
+        self.rep_penalty_spin.setSingleStep(0.01)
         param_layout.addWidget(self.rep_penalty_spin)
 
         # Output directory
