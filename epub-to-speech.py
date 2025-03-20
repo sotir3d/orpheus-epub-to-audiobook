@@ -16,6 +16,8 @@ import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
 import html2text
+import subprocess
+from datetime import timedelta
 
 # LM Studio API settings
 API_URL = "http://127.0.0.1:1234/v1/completions"
@@ -342,10 +344,23 @@ def merge_wav_files(wav_files, output_file):
     
     return output_file
 
+def get_audio_duration(file_path):
+    """Get duration of an audio file in seconds."""
+    audio = AudioSegment.from_file(file_path)
+    return len(audio) / 1000.0  # Duration in seconds
+
 def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperature=TEMPERATURE,
-                          top_p=TOP_P, repetition_penalty=REPETITION_PENALTY, max_tokens=MAX_TOKENS):
+                          top_p=TOP_P, repetition_penalty=REPETITION_PENALTY, max_tokens=MAX_TOKENS,
+                          chapter_info=None):
     """Process text in chunks and merge into a single output file."""
     chunks = chunk_text(text)
+    
+    # Enhanced logging
+    if chapter_info:
+        print(f"\n{'='*80}")
+        print(f"CHAPTER: {chapter_info['title']} - {chapter_info['index']+1}/{chapter_info['total']}")
+        print(f"{'='*80}")
+    
     print(f"Text split into {len(chunks)} chunks")
     
     # Create temp directory for chunk outputs
@@ -355,7 +370,12 @@ def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperat
     total_start_time = time.time()
     
     for i, chunk in enumerate(chunks):
-        print(f"\nProcessing chunk {i+1}/{len(chunks)}")
+        # Enhanced logging with chapter info
+        if chapter_info:
+            print(f"\nProcessing chunk {i+1}/{len(chunks)} of CHAPTER {chapter_info['index']+1}: '{chapter_info['title']}'")
+        else:
+            print(f"\nProcessing chunk {i+1}/{len(chunks)}")
+            
         print(f"Chunk size: {len(chunk)} characters")
         
         # Generate a temporary file name for this chunk
@@ -375,7 +395,11 @@ def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperat
         )
         chunk_end_time = time.time()
         
-        print(f"Chunk {i+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
+        # Enhanced logging with chapter info
+        if chapter_info:
+            print(f"Chunk {i+1}/{len(chunks)} of CHAPTER {chapter_info['index']+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
+        else:
+            print(f"Chunk {i+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
     
     # Merge all chunks into the final output file
     if not output_file:
@@ -484,6 +508,111 @@ def extract_chapters_from_epub(epub_path):
         print(f"Error processing EPUB file: {e}")
         return None, []
 
+
+def convert_wav_to_m4b(wav_file, output_file, chapter_info_list=None):
+    """Convert WAV file to M4B with chapter information."""
+    try:
+        # Check if ffmpeg is installed
+        try:
+            subprocess.run(["ffmpeg", "-version"], stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+        except (subprocess.SubprocessError, FileNotFoundError):
+            print("ERROR: ffmpeg is not installed or not in PATH. Please install ffmpeg to use this feature.")
+            return None
+
+        # Create metadata file for chapters if chapter_info_list is provided
+        chapters_file = None
+        if chapter_info_list and len(chapter_info_list) > 0:
+            chapters_file = os.path.splitext(output_file)[0] + "_chapters.txt"
+            with open(chapters_file, 'w', encoding='utf-8') as f:
+                # Write the global metadata header
+                f.write(";FFMETADATA1\n")
+
+                # Add chapter markers
+                for chapter in chapter_info_list:
+                    f.write("[CHAPTER]\n")
+                    f.write(f"TIMEBASE=1/1000\n")
+                    f.write(f"START={int(chapter['start_time'] * 1000)}\n")
+                    f.write(f"END={int(chapter['end_time'] * 1000)}\n")
+                    f.write(f"title={chapter['title']}\n\n")
+
+            print(f"Created chapter metadata file: {chapters_file}")
+
+        # Build the ffmpeg command correctly
+        cmd = ["ffmpeg"]
+
+        # First add all input files with their options
+        cmd.extend(["-i", wav_file])
+
+        if chapters_file:
+            cmd.extend(["-i", chapters_file])
+
+        # Then add all output options
+        cmd.extend(["-c:a", "aac", "-b:a", "128k"])
+
+        if chapters_file:
+            cmd.extend(["-map_metadata", "1"])
+
+        # Finally add the output file
+        cmd.append(output_file)
+
+        print(f"Converting to M4B with ffmpeg command: {' '.join(cmd)}")
+        subprocess.run(cmd, check=True)
+
+        print(f"Successfully converted to M4B: {output_file}")
+        return output_file
+
+    except Exception as e:
+        print(f"Error converting to M4B: {e}")
+        return None
+
+def merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True):
+    """Merge multiple chapter WAV files into a single WAV and optionally M4B file with chapter markers."""
+    print(f"\n{'='*80}")
+    print("MERGING ALL CHAPTERS INTO SINGLE AUDIOBOOK")
+    print(f"{'='*80}")
+    
+    # Get chapter information
+    chapter_info_list = []
+    current_position = 0.0  # Start time in seconds
+    
+    # Create a list of chapter info with start and end times
+    for i, chapter_file in enumerate(chapter_files):
+        chapter_title = os.path.basename(chapter_file).split('_', 1)[1].rsplit('.', 1)[0]
+        duration = get_audio_duration(chapter_file)
+        
+        chapter_info = {
+            'index': i,
+            'title': chapter_title,
+            'file': chapter_file,
+            'start_time': current_position,
+            'end_time': current_position + duration,
+            'duration': duration
+        }
+        
+        chapter_info_list.append(chapter_info)
+        current_position += duration
+        
+        print(f"Chapter {i+1}: '{chapter_title}' - Duration: {timedelta(seconds=duration)}")
+    
+    # Merge WAV files
+    combined = AudioSegment.empty()
+    
+    for chapter_info in chapter_info_list:
+        audio = AudioSegment.from_wav(chapter_info['file'])
+        combined += audio
+    
+    # Export to WAV
+    combined.export(output_wav, format="wav")
+    print(f"\nAll chapters merged into WAV file: {output_wav}")
+    print(f"Total duration: {timedelta(seconds=len(combined)/1000)}")
+    
+    # Create M4B version if requested
+    if create_m4b:
+        output_m4b = os.path.splitext(output_wav)[0] + ".m4b"
+        convert_wav_to_m4b(output_wav, output_m4b, chapter_info_list)
+        
+    return output_wav
+
 def process_epub_to_speech(epub_path, voice=DEFAULT_VOICE, output_dir=None, temperature=TEMPERATURE,
                           top_p=TOP_P, repetition_penalty=REPETITION_PENALTY, max_tokens=MAX_TOKENS):
     """Process an EPUB file and generate speech for each chapter."""
@@ -501,15 +630,36 @@ def process_epub_to_speech(epub_path, voice=DEFAULT_VOICE, output_dir=None, temp
     
     ensure_directory_exists(output_dir)
     
-    # Process each chapter
+    # List chapters and ask for confirmation
+    print("\nFound the following chapters:")
     for i, chapter in enumerate(chapters):
-        print(f"\nProcessing chapter {i+1}/{len(chapters)}: {chapter['title']}")
+        print(f"{i+1}. {chapter['title']} ({len(chapter['content'])} characters)")
+    
+    # Ask for confirmation before proceeding
+    proceed = input("\nDo you want to proceed with generating speech for these chapters? (y/n): ")
+    if proceed.lower() not in ['y', 'yes']:
+        print("Operation cancelled.")
+        return
+    
+    # Process each chapter
+    chapter_files = []
+    for i, chapter in enumerate(chapters):
+        print(f"\n{'='*80}")
+        print(f"PROCESSING CHAPTER {i+1}/{len(chapters)}")
+        print(f"TITLE: {chapter['title']}")
+        print(f"{'='*80}")
         
         # Create a safe filename from the chapter title
         safe_title = re.sub(r'[^\w\s-]', '', chapter['title']).strip().replace(' ', '_')
         output_file = os.path.join(output_dir, f"{i+1:03d}_{safe_title}.wav")
         
-        # Process the chapter text
+        # Process the chapter text with chapter info
+        chapter_info = {
+            'index': i,
+            'title': chapter['title'],
+            'total': len(chapters)
+        }
+        
         process_text_in_chunks(
             text=chapter['content'],
             voice=voice,
@@ -517,12 +667,20 @@ def process_epub_to_speech(epub_path, voice=DEFAULT_VOICE, output_dir=None, temp
             top_p=top_p,
             repetition_penalty=repetition_penalty,
             max_tokens=max_tokens,
-            output_file=output_file
+            output_file=output_file,
+            chapter_info=chapter_info
         )
         
-        print(f"Chapter {i+1} completed and saved to {output_file}")
+        chapter_files.append(output_file)
+        print(f"Chapter {i+1}/{len(chapters)} completed and saved to {output_file}")
+    
+    # Merge all chapter files into a single WAV file
+    if chapter_files:
+        output_wav = os.path.join(output_dir, f"{book_name}_complete.wav")
+        merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True)
     
     print(f"\nAll chapters processed. Audio files saved to {output_dir}")
+    print(f"Individual chapter WAV files are preserved in the same directory.")
     return output_dir
 
 def main():
@@ -542,6 +700,7 @@ def main():
     parser.add_argument("--chunk", action="store_true", help="Process text in smaller chunks")
     parser.add_argument("--chunk-size", type=int, default=MAX_CHUNK_LENGTH, 
                        help=f"Maximum characters per chunk (default: {MAX_CHUNK_LENGTH})")
+    parser.add_argument("--no-m4b", action="store_true", help="Don't create M4B file (WAV only)")
     
     args = parser.parse_args()
     
@@ -587,7 +746,7 @@ def main():
             return
     
     # 3. Check for positional arguments
-    elif len(sys.argv) > 1 and sys.argv[1] not in ("--voice", "--output", "--temperature", "--top_p", "--repetition_penalty", "--file", "--chunk", "--chunk-size", "--epub"):
+    elif len(sys.argv) > 1 and sys.argv[1] not in ("--voice", "--output", "--temperature", "--top_p", "--repetition_penalty", "--file", "--chunk", "--chunk-size", "--epub", "--no-m4b"):
         prompt = " ".join([arg for arg in sys.argv[1:] if not arg.startswith("--")])
     
     # 4. If no input is provided, prompt the user
@@ -595,7 +754,7 @@ def main():
         prompt = input("Enter text to synthesize: ")
         if not prompt:
             prompt = "Hello, I am Orpheus, an AI assistant with emotional speech capabilities."
-    
+
     # Default output file if none provided
     output_file = args.output
     if not output_file:
@@ -605,15 +764,15 @@ def main():
         timestamp = time.strftime("%Y%m%d_%H%M%S")
         output_file = f"outputs/{args.voice}_{timestamp}.wav"
         print(f"No output file specified. Saving to {output_file}")
-    
+
     # Generate speech
     start_time = time.time()
-    
+
     # Use chunking method if requested or text is long
     if args.chunk or len(prompt) > MAX_CHUNK_LENGTH:
         if not args.chunk and len(prompt) > MAX_CHUNK_LENGTH:
             print(f"Text is longer than {MAX_CHUNK_LENGTH} characters, automatically using chunking.")
-        
+
         process_text_in_chunks(
             text=prompt,
             voice=args.voice,
@@ -634,7 +793,7 @@ def main():
             max_tokens=MAX_TOKENS,
             output_file=output_file
         )
-    
+
     end_time = time.time()
     print(f"Speech generation completed in {end_time - start_time:.2f} seconds")
     print(f"Audio saved to {output_file}")
