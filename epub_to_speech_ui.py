@@ -1,3 +1,5 @@
+import os
+import time
 import sys
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
                                QListWidget, QListWidgetItem, QPushButton, QLabel, QComboBox,
@@ -12,6 +14,7 @@ class ConversionWorker(QObject):
     log_message = Signal(str)
     finished = Signal()
     error = Signal(str)
+    overwrite_required = Signal(str, str)
 
     def __init__(self, epub_path, voice, output_dir, temperature, top_p, repetition_penalty, selected_chapters):
         super().__init__()
@@ -23,6 +26,7 @@ class ConversionWorker(QObject):
         self.repetition_penalty = repetition_penalty
         self.selected_chapters = selected_chapters
         self._is_running = True
+        self.overwrite_confirmed = False
 
     def run(self):
         try:
@@ -73,7 +77,17 @@ class ConversionWorker(QObject):
             if self._is_running and chapter_files:
                 self.log_message.emit("\nMerging chapters into final audiobook...")
                 output_wav = f"{output_dir}/{book_title}_complete.wav"
-                epub_to_speech.merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True)
+                output_m4b = os.path.splitext(output_wav)[0] + ".m4b"
+
+                if os.path.exists(output_wav) or os.path.exists(output_m4b):
+                    self.overwrite_required.emit(output_wav, output_m4b)
+                    # Wait for response (using a simple flag)
+                    while not hasattr(self, 'overwrite_response'):
+                        time.sleep(0.1)
+                    if not self.overwrite_confirmed:
+                        self.log_message.emit("Conversion aborted by user.")
+                        return
+                epub_to_speech.merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True, silent=True)
                 self.log_message.emit(f"\n✅ All chapters merged into {output_wav}")
 
             self.finished.emit()
@@ -96,6 +110,15 @@ class MainWindow(QMainWindow):
 
         self.init_ui()
 
+    def handle_overwrite(self, output_wav, output_m4b):
+        reply = QMessageBox.question(
+            self, 'Overwrite?',
+            f"Files {output_wav} or {output_m4b} exist. Overwrite?",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        self.worker.overwrite_confirmed = reply == QMessageBox.Yes
+        self.worker.overwrite_response = True  # Signal to continue
+
     def init_ui(self):
         main_widget = QWidget()
         layout = QVBoxLayout()
@@ -110,7 +133,7 @@ class MainWindow(QMainWindow):
 
         # Chapter list
         self.chapter_list = QListWidget()
-        self.chapter_list.setSelectionMode(QListWidget.NoSelection)
+        self.chapter_list.setSelectionMode(QListWidget.ExtendedSelection)
 
         # Selection controls
         btn_layout = QHBoxLayout()
@@ -120,6 +143,12 @@ class MainWindow(QMainWindow):
         deselect_all_btn.clicked.connect(lambda: self.toggle_selection(False))
         btn_layout.addWidget(select_all_btn)
         btn_layout.addWidget(deselect_all_btn)
+        select_highlighted_btn = QPushButton("Select Highlighted")
+        select_highlighted_btn.clicked.connect(self.select_highlighted)
+        deselect_highlighted_btn = QPushButton("Deselect Highlighted")
+        deselect_highlighted_btn.clicked.connect(self.deselect_highlighted)
+        btn_layout.addWidget(select_highlighted_btn)
+        btn_layout.addWidget(deselect_highlighted_btn)
 
         # Voice selection
         voice_layout = QHBoxLayout()
@@ -240,6 +269,8 @@ class MainWindow(QMainWindow):
         self.worker = ConversionWorker(**params)
         self.worker.moveToThread(self.thread)
 
+        self.worker.overwrite_required.connect(self.handle_overwrite)
+
         # Connect signals
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.update_progress)
@@ -272,6 +303,15 @@ class MainWindow(QMainWindow):
         self.progress_bar.reset()
         self.progress_label.setText("Ready")
 
+    def select_highlighted(self):
+        selected_items = self.chapter_list.selectedItems()
+        for item in selected_items:
+            item.setCheckState(Qt.Checked)
+
+    def deselect_highlighted(self):
+        selected_items = self.chapter_list.selectedItems()
+        for item in selected_items:
+            item.setCheckState(Qt.Unchecked)
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)

@@ -516,7 +516,7 @@ def extract_chapters_from_epub(epub_path):
         return None, []
 
 
-def convert_wav_to_m4b(wav_file, output_file, chapter_info_list=None):
+def convert_wav_to_m4b(wav_file, output_file, chapter_info_list=None, silent=False):
     """Convert WAV file to M4B with chapter information."""
     try:
         # Check if ffmpeg is installed
@@ -548,10 +548,16 @@ def convert_wav_to_m4b(wav_file, output_file, chapter_info_list=None):
         cmd = ["ffmpeg"]
 
         # First add all input files with their options
-        cmd.extend(["-i", wav_file])
+        if silent:
+            cmd.extend(["-y", "-i", wav_file])
+        else:
+            cmd.extend(["-i", wav_file])
 
         if chapters_file:
-            cmd.extend(["-i", chapters_file])
+            if silent:
+                cmd.extend(["-y", "-i", chapters_file])
+            else:
+                cmd.extend(["-i", chapters_file])
 
         # Then add all output options
         cmd.extend(["-c:a", "aac", "-b:a", "128k"])
@@ -572,7 +578,7 @@ def convert_wav_to_m4b(wav_file, output_file, chapter_info_list=None):
         print(f"Error converting to M4B: {e}")
         return None
 
-def merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True):
+def merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True, silent=False):
     """Merge multiple chapter WAV files into a single WAV and optionally M4B file with chapter markers."""
     print(f"\n{'='*80}")
     print("MERGING ALL CHAPTERS INTO SINGLE AUDIOBOOK")
@@ -616,7 +622,7 @@ def merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True):
     # Create M4B version if requested
     if create_m4b:
         output_m4b = os.path.splitext(output_wav)[0] + ".m4b"
-        convert_wav_to_m4b(output_wav, output_m4b, chapter_info_list)
+        convert_wav_to_m4b(output_wav, output_m4b, chapter_info_list, silent)
         
     return output_wav
 
@@ -684,7 +690,7 @@ def process_epub_to_speech(epub_path, voice=DEFAULT_VOICE, output_dir=None, temp
     # Merge all chapter files into a single WAV file
     if chapter_files:
         output_wav = os.path.join(output_dir, f"{book_name}_complete.wav")
-        merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True)
+        merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True, silent=False)
     
     print(f"\nAll chapters processed. Audio files saved to {output_dir}")
     print(f"Individual chapter WAV files are preserved in the same directory.")
