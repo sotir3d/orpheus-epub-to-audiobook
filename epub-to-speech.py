@@ -27,11 +27,11 @@ HEADERS = {
 
 # Model parameters
 MAX_TOKENS = 1200
-TEMPERATURE = 0.4
+TEMPERATURE = 0.6
 TOP_P = 0.9
-REPETITION_PENALTY = 1.1
+REPETITION_PENALTY = 1.3
 SAMPLE_RATE = 24000  # SNAC model uses 24kHz
-MAX_CHUNK_LENGTH = 100  # Maximum number of characters per chunk
+MAX_CHUNK_LENGTH = 150  # Maximum number of characters per chunk
 TEMP_DIR = "temp_chunks"  # Directory for temporary chunk WAV files
 
 # Available voices based on the Orpheus-TTS repository
