@@ -27,7 +27,7 @@ HEADERS = {
 
 # Model parameters
 MAX_TOKENS = 1200
-TEMPERATURE = 0.3
+TEMPERATURE = 0.65 #0.7 good?
 TOP_P = 0.9
 REPETITION_PENALTY = 1.2
 SAMPLE_RATE = 24000  # SNAC model uses 24kHz
