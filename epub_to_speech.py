@@ -351,7 +351,7 @@ def get_audio_duration(file_path):
 
 def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperature=TEMPERATURE,
                           top_p=TOP_P, repetition_penalty=REPETITION_PENALTY, max_tokens=MAX_TOKENS,
-                          chapter_info=None):
+                          chapter_info=None, log_callback=print):
     """Process text in chunks and merge into a single output file."""
     chunks = chunk_text(text)
     
@@ -362,6 +362,7 @@ def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperat
         print(f"{'='*80}")
     
     print(f"Text split into {len(chunks)} chunks")
+    log_callback(f"Text split into {len(chunks)} chunks")
     
     # Create temp directory for chunk outputs
     ensure_directory_exists(TEMP_DIR)
@@ -373,11 +374,14 @@ def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperat
         # Enhanced logging with chapter info
         if chapter_info:
             print(f"\nProcessing chunk {i+1}/{len(chunks)} of CHAPTER {chapter_info['index']+1}: '{chapter_info['title']}'")
+            log_callback(f"\nProcessing chunk {i+1}/{len(chunks)} of CHAPTER {chapter_info['index']+1}: '{chapter_info['title']}'")
         else:
             print(f"\nProcessing chunk {i+1}/{len(chunks)}")
+            log_callback(f"\nProcessing chunk {i+1}/{len(chunks)}")
             
         print(f"Chunk size: {len(chunk)} characters")
-        
+        log_callback(f"Chunk size: {len(chunk)} characters")
+
         # Generate a temporary file name for this chunk
         temp_output_file = os.path.join(TEMP_DIR, f"chunk_{i+1:03d}.wav")
         chunk_files.append(temp_output_file)
@@ -398,9 +402,11 @@ def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperat
         # Enhanced logging with chapter info
         if chapter_info:
             print(f"Chunk {i+1}/{len(chunks)} of CHAPTER {chapter_info['index']+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
+            log_callback(f"Chunk {i+1}/{len(chunks)} of CHAPTER {chapter_info['index']+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
         else:
             print(f"Chunk {i+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
-    
+            log_callback(f"Chunk {i+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
+
     # Merge all chunks into the final output file
     if not output_file:
         timestamp = time.strftime("%Y%m%d_%H%M%S")
@@ -414,7 +420,8 @@ def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperat
     
     total_end_time = time.time()
     print(f"Total processing time: {total_end_time - total_start_time:.2f} seconds")
-    
+    log_callback(f"Total processing time: {total_end_time - total_start_time:.2f} seconds")
+
     # Cleanup temp files if needed (commented out for now)
     # for file in chunk_files:
     #     os.remove(file)

@@ -6,8 +6,10 @@ from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, 
 from PySide6.QtCore import Qt, QThread, Signal, QObject
 import epub_to_speech
 
+
 class ConversionWorker(QObject):
-    progress = Signal(str, int, int)
+    progress = Signal(int, int)  # current, total
+    log_message = Signal(str)
     finished = Signal()
     error = Signal(str)
 
@@ -29,11 +31,10 @@ class ConversionWorker(QObject):
                 self.error.emit("No chapters found in EPUB file")
                 return
 
-            # Process only selected chapters
             selected_chapters = [chapters[i] for i in self.selected_chapters]
             total_chapters = len(selected_chapters)
+            self.log_message.emit(f"Starting conversion of {total_chapters} chapters...")
 
-            # Create output directory
             output_dir = self.output_dir or f"outputs/epub_{book_title.replace(' ', '_')}"
             epub_to_speech.ensure_directory_exists(output_dir)
 
@@ -42,10 +43,15 @@ class ConversionWorker(QObject):
                 if not self._is_running:
                     break
 
-                self.progress.emit(chapter['title'], idx+1, total_chapters)
+                self.log_message.emit(f"\n▶ Processing chapter {idx + 1}/{total_chapters}: {chapter['title']}")
+                self.progress.emit(idx + 1, total_chapters)
 
                 safe_title = epub_to_speech.re.sub(r'[^\w\s-]', '', chapter['title']).strip().replace(' ', '_')
-                output_file = f"{output_dir}/{idx+1:03d}_{safe_title}.wav"
+                output_file = f"{output_dir}/{idx + 1:03d}_{safe_title}.wav"
+
+                # Create custom logger for chunk-level logging
+                def chunk_logger(msg):
+                    self.log_message.emit(f"  {msg}")
 
                 epub_to_speech.process_text_in_chunks(
                     text=chapter['content'],
@@ -58,14 +64,17 @@ class ConversionWorker(QObject):
                         'index': idx,
                         'title': chapter['title'],
                         'total': total_chapters
-                    }
+                    },
+                    log_callback=chunk_logger
                 )
                 chapter_files.append(output_file)
+                self.log_message.emit(f"✓ Chapter {idx + 1} completed")
 
             if self._is_running and chapter_files:
+                self.log_message.emit("\nMerging chapters into final audiobook...")
                 output_wav = f"{output_dir}/{book_title}_complete.wav"
                 epub_to_speech.merge_chapter_wav_files(chapter_files, output_wav, create_m4b=True)
-                self.progress.emit("Conversion complete!", total_chapters, total_chapters)
+                self.log_message.emit(f"\n✅ All chapters merged into {output_wav}")
 
             self.finished.emit()
 
@@ -75,13 +84,13 @@ class ConversionWorker(QObject):
     def stop(self):
         self._is_running = False
 
+
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("EPUB to Audiobook Converter")
         self.setGeometry(100, 100, 800, 600)
 
-        # Worker thread
         self.worker = None
         self.thread = None
 
@@ -101,7 +110,7 @@ class MainWindow(QMainWindow):
 
         # Chapter list
         self.chapter_list = QListWidget()
-        self.chapter_list.setSelectionMode(QListWidget.MultiSelection)
+        self.chapter_list.setSelectionMode(QListWidget.NoSelection)
 
         # Selection controls
         btn_layout = QHBoxLayout()
@@ -179,7 +188,7 @@ class MainWindow(QMainWindow):
     def toggle_selection(self, select):
         for i in range(self.chapter_list.count()):
             item = self.chapter_list.item(i)
-            item.setSelected(select)
+            item.setCheckState(Qt.Checked if select else Qt.Unchecked)
 
     def select_epub(self):
         path, _ = QFileDialog.getOpenFileName(self, "Select EPUB file", "", "EPUB files (*.epub)")
@@ -201,7 +210,6 @@ class MainWindow(QMainWindow):
                 item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
                 item.setCheckState(Qt.Checked)
                 self.chapter_list.addItem(item)
-            self.toggle_selection(True)
 
     def start_conversion(self):
         if not self.file_label.text() or self.file_label.text() == "No EPUB file selected":
@@ -209,12 +217,11 @@ class MainWindow(QMainWindow):
             return
 
         selected_chapters = [i for i in range(self.chapter_list.count())
-                            if self.chapter_list.item(i).checkState() == Qt.Checked]
+                             if self.chapter_list.item(i).checkState() == Qt.Checked]
         if not selected_chapters:
             QMessageBox.warning(self, "Error", "Please select at least one chapter")
             return
 
-        # Get parameters
         params = {
             'epub_path': self.file_label.text(),
             'voice': self.voice_combo.currentText(),
@@ -225,6 +232,9 @@ class MainWindow(QMainWindow):
             'selected_chapters': selected_chapters
         }
 
+        # Clear previous logs
+        self.log_area.clear()
+
         # Setup worker thread
         self.thread = QThread()
         self.worker = ConversionWorker(**params)
@@ -233,6 +243,7 @@ class MainWindow(QMainWindow):
         # Connect signals
         self.thread.started.connect(self.worker.run)
         self.worker.progress.connect(self.update_progress)
+        self.worker.log_message.connect(self.log_area.append)
         self.worker.finished.connect(self.thread.quit)
         self.worker.finished.connect(self.worker.deleteLater)
         self.thread.finished.connect(self.thread.deleteLater)
@@ -245,14 +256,14 @@ class MainWindow(QMainWindow):
         self.start_btn.setEnabled(False)
         self.start_btn.setText("Converting...")
 
-    def update_progress(self, message, current, total):
+    def update_progress(self, current, total):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
-        self.progress_label.setText(f"Processing: {message}")
-        self.log_area.append(f"Chapter {current}/{total}: {message}")
+        self.progress_label.setText(f"Progress: {current}/{total} chapters")
 
     def show_error(self, message):
         QMessageBox.critical(self, "Error", message)
+        self.log_area.append(f"\n❌ Error: {message}")
         self.reset_ui()
 
     def reset_ui(self):
@@ -260,6 +271,7 @@ class MainWindow(QMainWindow):
         self.start_btn.setText("Start Conversion")
         self.progress_bar.reset()
         self.progress_label.setText("Ready")
+
 
 if __name__ == "__main__":
     app = QApplication(sys.argv)
