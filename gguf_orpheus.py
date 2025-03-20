@@ -10,6 +10,8 @@ import argparse
 import threading
 import queue
 import asyncio
+import re
+from pydub import AudioSegment
 
 # LM Studio API settings
 API_URL = "http://127.0.0.1:1234/v1/completions"
@@ -23,6 +25,8 @@ TEMPERATURE = 0.6
 TOP_P = 0.9
 REPETITION_PENALTY = 1.1
 SAMPLE_RATE = 24000  # SNAC model uses 24kHz
+MAX_CHUNK_LENGTH = 100  # Maximum number of characters per chunk
+TEMP_DIR = "temp_chunks"  # Directory for temporary chunk WAV files
 
 # Available voices based on the Orpheus-TTS repository
 AVAILABLE_VOICES = ["tara", "leah", "jess", "leo", "dan", "mia", "zac", "zoe"]
@@ -242,10 +246,160 @@ def list_available_voices():
     print("\nAvailable emotion tags:")
     print("<laugh>, <chuckle>, <sigh>, <cough>, <sniffle>, <groan>, <yawn>, <gasp>")
 
+def read_text_from_file(file_path):
+    """Read text from a file."""
+    try:
+        with open(file_path, 'r', encoding='utf-8') as file:
+            text = file.read().strip()
+            if not text:
+                print(f"Warning: File '{file_path}' is empty.")
+                return None
+            return text
+    except FileNotFoundError:
+        print(f"Error: File '{file_path}' not found.")
+        return None
+    except Exception as e:
+        print(f"Error reading file '{file_path}': {e}")
+        return None
+
+def chunk_text(text, max_length=MAX_CHUNK_LENGTH):
+    """Split text into smaller chunks at sentence boundaries."""
+    # Ensure we don't have chunks that are too small
+    min_length = max(50, max_length // 10)
+    
+    # First split by paragraph boundaries
+    paragraphs = text.split('\n')
+    paragraphs = [p for p in paragraphs if p.strip()]
+    
+    chunks = []
+    current_chunk = ""
+    
+    for paragraph in paragraphs:
+        # If paragraph is already longer than max_length, split it
+        if len(paragraph) > max_length:
+            # Split by sentence
+            sentences = re.split(r'(?<=[.!?])\s+', paragraph)
+            for sentence in sentences:
+                if len(sentence) > max_length:
+                    # Very long sentence, split by commas or other punctuation
+                    subparts = re.split(r'(?<=[,;:])\s+', sentence)
+                    for part in subparts:
+                        if len(current_chunk) + len(part) <= max_length:
+                            current_chunk += part + " "
+                        else:
+                            if current_chunk:
+                                chunks.append(current_chunk.strip())
+                            current_chunk = part + " "
+                elif len(current_chunk) + len(sentence) <= max_length:
+                    current_chunk += sentence + " "
+                else:
+                    chunks.append(current_chunk.strip())
+                    current_chunk = sentence + " "
+        elif len(current_chunk) + len(paragraph) + 1 <= max_length:
+            current_chunk += paragraph + "\n"
+        else:
+            chunks.append(current_chunk.strip())
+            current_chunk = paragraph + "\n"
+    
+    # Add the last chunk if it has content
+    if current_chunk.strip():
+        chunks.append(current_chunk.strip())
+    
+    # Ensure we don't have chunks that are too small (merge with next chunk)
+    i = 0
+    while i < len(chunks) - 1:
+        if len(chunks[i]) < min_length:
+            if len(chunks[i]) + len(chunks[i+1]) <= max_length:
+                chunks[i] = chunks[i] + " " + chunks[i+1]
+                chunks.pop(i+1)
+            else:
+                i += 1
+        else:
+            i += 1
+            
+    return chunks
+
+def ensure_directory_exists(directory):
+    """Ensure that a directory exists, create it if it doesn't."""
+    if not os.path.exists(directory):
+        os.makedirs(directory)
+
+def merge_wav_files(wav_files, output_file):
+    """Merge multiple WAV files into a single WAV file."""
+    combined = AudioSegment.empty()
+    
+    for wav_file in wav_files:
+        audio = AudioSegment.from_wav(wav_file)
+        combined += audio
+    
+    combined.export(output_file, format="wav")
+    print(f"All chunks merged into: {output_file}")
+    print(f"Total duration: {len(combined) / 1000:.2f} seconds")
+    
+    return output_file
+
+def process_text_in_chunks(text, voice=DEFAULT_VOICE, output_file=None, temperature=TEMPERATURE,
+                          top_p=TOP_P, repetition_penalty=REPETITION_PENALTY, max_tokens=MAX_TOKENS):
+    """Process text in chunks and merge into a single output file."""
+    chunks = chunk_text(text)
+    print(f"Text split into {len(chunks)} chunks")
+    
+    # Create temp directory for chunk outputs
+    ensure_directory_exists(TEMP_DIR)
+    
+    chunk_files = []
+    total_start_time = time.time()
+    
+    for i, chunk in enumerate(chunks):
+        print(f"\nProcessing chunk {i+1}/{len(chunks)}")
+        print(f"Chunk size: {len(chunk)} characters")
+        
+        # Generate a temporary file name for this chunk
+        temp_output_file = os.path.join(TEMP_DIR, f"chunk_{i+1:03d}.wav")
+        chunk_files.append(temp_output_file)
+        
+        # Generate speech for this chunk
+        chunk_start_time = time.time()
+        generate_speech_from_api(
+            prompt=chunk,
+            voice=voice,
+            temperature=temperature,
+            top_p=top_p,
+            repetition_penalty=repetition_penalty,
+            max_tokens=max_tokens,
+            output_file=temp_output_file
+        )
+        chunk_end_time = time.time()
+        
+        print(f"Chunk {i+1} completed in {chunk_end_time - chunk_start_time:.2f} seconds")
+    
+    # Merge all chunks into the final output file
+    if not output_file:
+        timestamp = time.strftime("%Y%m%d_%H%M%S")
+        output_file = f"outputs/{voice}_{timestamp}_combined.wav"
+        
+    # Create the outputs directory if it doesn't exist
+    ensure_directory_exists(os.path.dirname(output_file))
+    
+    # Merge the chunks
+    merge_wav_files(chunk_files, output_file)
+    
+    total_end_time = time.time()
+    print(f"Total processing time: {total_end_time - total_start_time:.2f} seconds")
+    
+    # Cleanup temp files if needed (commented out for now)
+    # for file in chunk_files:
+    #     os.remove(file)
+    # os.rmdir(TEMP_DIR)
+    
+    return output_file
+
 def main():
+    global MAX_CHUNK_LENGTH
     # Parse command line arguments
     parser = argparse.ArgumentParser(description="Orpheus Text-to-Speech using LM Studio API")
     parser.add_argument("--text", type=str, help="Text to convert to speech")
+    parser.add_argument("--file", type=str, help="Path to text file to read input from")
     parser.add_argument("--voice", type=str, default=DEFAULT_VOICE, help=f"Voice to use (default: {DEFAULT_VOICE})")
     parser.add_argument("--output", type=str, help="Output WAV file path")
     parser.add_argument("--list-voices", action="store_true", help="List available voices")
@@ -253,6 +407,9 @@ def main():
     parser.add_argument("--top_p", type=float, default=TOP_P, help="Top-p sampling parameter")
     parser.add_argument("--repetition_penalty", type=float, default=REPETITION_PENALTY, 
                        help="Repetition penalty (>=1.1 required for stable generation)")
+    parser.add_argument("--chunk", action="store_true", help="Process text in smaller chunks")
+    parser.add_argument("--chunk-size", type=int, default=MAX_CHUNK_LENGTH, 
+                       help=f"Maximum characters per chunk (default: {MAX_CHUNK_LENGTH})")
     
     args = parser.parse_args()
     
@@ -260,15 +417,35 @@ def main():
         list_available_voices()
         return
     
-    # Use text from command line or prompt user
-    prompt = args.text
-    if not prompt:
-        if len(sys.argv) > 1 and sys.argv[1] not in ("--voice", "--output", "--temperature", "--top_p", "--repetition_penalty"):
-            prompt = " ".join([arg for arg in sys.argv[1:] if not arg.startswith("--")])
+    # Update chunk size if specified
+    if args.chunk_size:
+        MAX_CHUNK_LENGTH = args.chunk_size
+    
+    # Check for input text in this priority: command line text, file input, positional args, default
+    prompt = None
+    
+    # 1. Check for --text argument
+    if args.text:
+        prompt = args.text
+    
+    # 2. Check for --file argument
+    elif args.file:
+        file_text = read_text_from_file(args.file)
+        if file_text:
+            prompt = file_text
         else:
-            prompt = input("Enter text to synthesize: ")
-            if not prompt:
-                prompt = "Hello, I am Orpheus, an AI assistant with emotional speech capabilities."
+            print("Error reading from file. Please provide valid text input.")
+            return
+    
+    # 3. Check for positional arguments
+    elif len(sys.argv) > 1 and sys.argv[1] not in ("--voice", "--output", "--temperature", "--top_p", "--repetition_penalty", "--file", "--chunk", "--chunk-size"):
+        prompt = " ".join([arg for arg in sys.argv[1:] if not arg.startswith("--")])
+    
+    # 4. If no input is provided, prompt the user
+    if not prompt:
+        prompt = input("Enter text to synthesize: ")
+        if not prompt:
+            prompt = "Hello, I am Orpheus, an AI assistant with emotional speech capabilities."
     
     # Default output file if none provided
     output_file = args.output
@@ -282,18 +459,36 @@ def main():
     
     # Generate speech
     start_time = time.time()
-    audio_segments = generate_speech_from_api(
-        prompt=prompt,
-        voice=args.voice,
-        temperature=args.temperature,
-        top_p=args.top_p,
-        repetition_penalty=args.repetition_penalty,
-        output_file=output_file
-    )
-    end_time = time.time()
     
+    # Use chunking method if requested or text is long
+    if args.chunk or len(prompt) > MAX_CHUNK_LENGTH:
+        if not args.chunk and len(prompt) > MAX_CHUNK_LENGTH:
+            print(f"Text is longer than {MAX_CHUNK_LENGTH} characters, automatically using chunking.")
+        
+        process_text_in_chunks(
+            text=prompt,
+            voice=args.voice,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
+            max_tokens=MAX_TOKENS,
+            output_file=output_file
+        )
+    else:
+        # Process the entire text at once
+        audio_segments = generate_speech_from_api(
+            prompt=prompt,
+            voice=args.voice,
+            temperature=args.temperature,
+            top_p=args.top_p,
+            repetition_penalty=args.repetition_penalty,
+            max_tokens=MAX_TOKENS,
+            output_file=output_file
+        )
+    
+    end_time = time.time()
     print(f"Speech generation completed in {end_time - start_time:.2f} seconds")
     print(f"Audio saved to {output_file}")
 
 if __name__ == "__main__":
-    main() 
+    main()
