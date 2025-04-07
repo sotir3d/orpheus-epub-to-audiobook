@@ -309,16 +309,15 @@ class MainWindow(QMainWindow):
         progress_log_layout.addWidget(self.log_area)
         progress_log_group.setLayout(progress_log_layout)
 
-
         # --- Control Buttons ---
         control_layout = QHBoxLayout()
         self.start_btn = QPushButton("Start Conversion")
-        self.start_btn.setStyleSheet("background-color: lightgreen;")
+        self.start_btn.setStyleSheet("background-color: darkseagreen; color: black;")
         self.start_btn.clicked.connect(self.start_conversion)
         self.stop_btn = QPushButton("Stop Conversion")
-        self.stop_btn.setStyleSheet("background-color: lightcoral;")
+        self.stop_btn.setStyleSheet("background-color: indianred; color: black;")
         self.stop_btn.clicked.connect(self.stop_conversion)
-        self.stop_btn.setEnabled(False) # Initially disabled
+        self.stop_btn.setEnabled(False)  # Initially disabled
         control_layout.addStretch()
         control_layout.addWidget(self.start_btn)
         control_layout.addWidget(self.stop_btn)
@@ -338,8 +337,9 @@ class MainWindow(QMainWindow):
 
         # Params and Output side-by-side
         hbox_params_output = QHBoxLayout()
-        hbox_params_output.addWidget(params_group)
-        hbox_params_output.addWidget(output_group)
+        # Add stretch factor (e.g., 1) to both group boxes
+        hbox_params_output.addWidget(params_group, stretch=1)
+        hbox_params_output.addWidget(output_group, stretch=1)
         main_layout.addLayout(hbox_params_output)
 
         main_layout.addWidget(progress_log_group)
