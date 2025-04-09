@@ -291,49 +291,68 @@ def extract_chapters_from_epub(epub_path):
 
 # --- Audio Generation using outeTTS (Replaces Orpheus API calls) ---
 
-def generate_speech_for_chapter(text, output_file, speaker_profile=DEFAULT_SPEAKER, temperature=TEMPERATURE, log_callback=print):
-    """Generates speech for a given text (chapter) using outeTTS."""
+def generate_speech_for_chapter(text, output_file, speaker_profile, temperature=TEMPERATURE, log_callback=print):
+    """
+    Generates speech for a given text (chapter) using outeTTS.
+    Accepts speaker_profile as str (name/path) or outetts.Speaker object.
+    """
+    active_speaker = None # Variable to hold the final Speaker object
     try:
-        interface = get_outeTTS_interface() # Initialize if needed
+        interface = get_outeTTS_interface()
         if not interface:
              raise RuntimeError("outeTTS Interface not available.")
 
-        log_callback(f"Loading speaker profile: {speaker_profile}")
-        # TODO: Add logic here to load speaker from file if speaker_profile is a path
-        # For now, assumes it's a built-in name like "EN-FEMALE-1-NEUTRAL"
-        try:
-            if os.path.exists(speaker_profile) and speaker_profile.endswith(".json"):
-                 log_callback(f"  Loading speaker from file: {speaker_profile}")
-                 speaker = interface.load_speaker(speaker_profile)
-            else:
-                 log_callback(f"  Loading default/built-in speaker: {speaker_profile}")
-                 speaker = interface.load_default_speaker(speaker_profile)
-        except Exception as speaker_load_err:
-            log_callback(f"  WARNING: Failed to load speaker '{speaker_profile}'. Falling back to default '{DEFAULT_SPEAKER}'. Error: {speaker_load_err}")
-            speaker = interface.load_default_speaker(DEFAULT_SPEAKER)
+        # --- Determine the speaker object to use ---
+        if isinstance(speaker_profile, outetts.Speaker):
+            log_callback("Using pre-loaded/created custom speaker object.")
+            active_speaker = speaker_profile
+        elif isinstance(speaker_profile, str):
+            speaker_path_or_name = speaker_profile
+            log_callback(f"Loading speaker profile: {speaker_path_or_name}")
+            try:
+                if os.path.exists(speaker_path_or_name) and speaker_path_or_name.lower().endswith(".json"):
+                     log_callback(f"  Loading speaker from file: {speaker_path_or_name}")
+                     active_speaker = interface.load_speaker(speaker_path_or_name)
+                else:
+                     log_callback(f"  Loading default/built-in speaker: {speaker_path_or_name}")
+                     active_speaker = interface.load_default_speaker(speaker_path_or_name)
+            except Exception as speaker_load_err:
+                log_callback(f"  WARNING: Failed to load speaker '{speaker_path_or_name}'. Falling back to default '{DEFAULT_SPEAKER}'. Error: {speaker_load_err}")
+                try:
+                    active_speaker = interface.load_default_speaker(DEFAULT_SPEAKER)
+                except Exception as fallback_err:
+                     log_callback(f"  FATAL: Failed to load even the default speaker! Error: {fallback_err}")
+                     raise RuntimeError("Failed to load any speaker profile.") from fallback_err
+        else:
+             log_callback(f"ERROR: Invalid speaker_profile type provided: {type(speaker_profile)}. Falling back to default '{DEFAULT_SPEAKER}'.")
+             try:
+                 active_speaker = interface.load_default_speaker(DEFAULT_SPEAKER)
+             except Exception as fallback_err:
+                  log_callback(f"  FATAL: Failed to load the default speaker during fallback! Error: {fallback_err}")
+                  raise RuntimeError("Failed to load default speaker profile during fallback.") from fallback_err
 
+        # --- Ensure speaker was successfully loaded/obtained ---
+        if not active_speaker:
+             raise RuntimeError("Speaker profile could not be loaded or determined.")
 
+        # --- Generate Speech ---
         log_callback(f"Generating speech (temp={temperature})...")
         start_time = time.time()
 
         gen_config = outetts.GenerationConfig(
             text=text,
-            generation_type=outetts.GenerationType.CHUNKED, # Use outeTTS internal chunking
-            speaker=speaker,
+            generation_type=outetts.GenerationType.CHUNKED,
+            speaker=active_speaker, # Use the determined speaker object
             sampler_config=outetts.SamplerConfig(
                 temperature=temperature
-                # Add other sampler config options here if needed/available in outeTTS
             ),
         )
 
-        # Generate audio
         output_audio = interface.generate(config=gen_config)
-
-        # Save audio
         output_audio.save(output_file)
 
         end_time = time.time()
-        duration = get_audio_duration(output_file) # Get actual duration after saving
+        duration = get_audio_duration(output_file)
         log_callback(f"Speech generated and saved to {output_file}")
         log_callback(f"Generation took {end_time - start_time:.2f}s for {duration:.2f}s of audio.")
         return True
@@ -342,7 +361,6 @@ def generate_speech_for_chapter(text, output_file, speaker_profile=DEFAULT_SPEAK
         import traceback
         log_callback(f"❌ ERROR generating speech for chapter: {e}")
         log_callback(traceback.format_exc())
-        # Ensure output file doesn't exist if generation failed midway
         if os.path.exists(output_file):
             try: os.remove(output_file)
             except OSError: pass
@@ -659,12 +677,12 @@ def process_epub_chapters(epub_path, output_dir, temperature, selected_chapter_i
 # --- CLI Section (Optional - kept for standalone use) ---
 
 def main_cli():
-    parser = argparse.ArgumentParser(description="outeTTS EPUB to Audiobook Converter")
+    parser = argparse.ArgumentParser(description="outeTTS EPUB to Audiobook Converter (CLI)")
     parser.add_argument("epub_path", help="Path to the EPUB file")
     parser.add_argument("--output-dir", "-o", help="Directory to save output files (default: outputs/epub_[Book Title])")
-    parser.add_argument("--speaker", "-s", default=DEFAULT_SPEAKER, help=f"Speaker profile name or path to .json (default: {DEFAULT_SPEAKER})")
+    # Modify speaker help text slightly
+    parser.add_argument("--speaker", "-s", default=DEFAULT_SPEAKER, help=f"Speaker profile: Built-in name, path to .json, or path to .wav/.mp3 to create from (default: {DEFAULT_SPEAKER})")
     parser.add_argument("--temperature", "-t", type=float, default=TEMPERATURE, help=f"Generation temperature (default: {TEMPERATURE})")
-    # Add args for outetts config if needed, e.g., --model-path, --backend
 
     args = parser.parse_args()
 
@@ -679,19 +697,53 @@ def main_cli():
         return reply.lower() == 'y'
 
     print(f"Starting EPUB processing for: {args.epub_path}")
-    print(f"Speaker: {args.speaker}, Temperature: {args.temperature}")
+    print(f"Temperature: {args.temperature}")
+
+    # --- Handle speaker argument for CLI ---
+    speaker_input = args.speaker
+    actual_speaker_profile = None
+    interface_cli = None # Need interface for creation
+    try:
+        # Check if it's an audio file to create from
+        is_audio_file = any(speaker_input.lower().endswith(ext) for ext in ['.wav', '.mp3', '.flac', '.ogg'])
+
+        if is_audio_file and os.path.exists(speaker_input):
+             print(f"Attempting to create speaker from audio file: {speaker_input}")
+             interface_cli = get_outeTTS_interface() # Initialize if needed
+             if not interface_cli: raise RuntimeError("outeTTS interface failed to load for CLI speaker creation.")
+             actual_speaker_profile = interface_cli.create_speaker(speaker_input)
+             print("Speaker created from audio file.")
+        else:
+             # Assume it's a name or JSON path (will be handled inside process_epub_chapters)
+             print(f"Using speaker name/path: {speaker_input}")
+             actual_speaker_profile = speaker_input
+
+    except Exception as cli_speaker_err:
+         print(f"Error handling speaker argument '{speaker_input}': {cli_speaker_err}")
+         print(f"Falling back to default speaker: {DEFAULT_SPEAKER}")
+         actual_speaker_profile = DEFAULT_SPEAKER
+    # --- End CLI speaker handling ---
+
 
     try:
+        # Get all chapter indices for CLI mode
+        _, all_chapters_cli = extract_chapters_from_epub(args.epub_path)
+        all_indices = list(range(len(all_chapters_cli))) if all_chapters_cli else []
+
+        if not all_indices:
+             print("No chapters found to process.")
+             return
+
         success, message = process_epub_chapters(
             epub_path=args.epub_path,
             output_dir=args.output_dir,
             temperature=args.temperature,
-            selected_chapter_indices=None, # Process all chapters in CLI mode
-            speaker_profile=args.speaker,
+            selected_chapter_indices=all_indices, # Process all
+            speaker_profile=actual_speaker_profile, # Pass created object or name/path
             log_callback=log,
             progress_callback=progress,
             processing_chapter_callback=processing,
-            check_stop_callback=check_stop, # Basic stop handling not implemented for CLI
+            check_stop_callback=check_stop,
             overwrite_callback=overwrite
         )
 
@@ -699,7 +751,6 @@ def main_cli():
 
     except KeyboardInterrupt:
          print("\nOperation interrupted by user.")
-         # stop_requested = True # Might not be checked depending on where it was interrupted
     except Exception as e:
          print(f"\nAn error occurred: {e}")
          import traceback
@@ -707,7 +758,6 @@ def main_cli():
 
 
 if __name__ == "__main__":
-    # This allows running the script standalone from CLI
     main_cli()
 
 # --- END OF FILE epub_to_speech_oute.py ---
