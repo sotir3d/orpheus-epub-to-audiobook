@@ -366,38 +366,50 @@ class MainWindow(QMainWindow):
         self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
 
     def set_controls_enabled(self, enabled):
-        """Enable or disable input controls."""
+        """Enable or disable input controls, considering backend status and conversion state."""
+
+        # Determine current state more reliably
+        # Check if a thread object exists AND if it is currently running
         is_converting = self.thread is not None and self.thread.isRunning()
         backend_ok = self.status_label.text() != "ERROR: outeTTS backend failed to load!"
 
-        # Enable based on 'enabled' AND backend status
-        effective_enabled = enabled and backend_ok
+        # --- Determine effective enable state for most controls ---
+        # Most controls should be enabled if:
+        # - The overall 'enabled' flag is True (meaning not currently processing start/stop)
+        # - AND the backend is okay
+        # - AND it's not actively converting right now
+        effective_enabled_for_inputs = enabled and backend_ok and not is_converting
 
-        self.select_epub_btn.setEnabled(effective_enabled and not is_converting)
-        self.chapter_list.setEnabled(effective_enabled and not is_converting)
-        self.speaker_combo.setEnabled(effective_enabled and not is_converting) # Enable dropdown
-        self.create_speaker_btn.setEnabled(effective_enabled and not is_converting) # Enable create button
+        self.select_epub_btn.setEnabled(effective_enabled_for_inputs)
+        self.chapter_list.setEnabled(effective_enabled_for_inputs)
+        self.speaker_combo.setEnabled(effective_enabled_for_inputs)
+        self.create_speaker_btn.setEnabled(effective_enabled_for_inputs)
 
-        buttons_layout = self.chapter_list.parent().layout().itemAt(1).layout()
-        if buttons_layout:
-            for i in range(buttons_layout.count()):
-                widget_item = buttons_layout.itemAt(i)
-                if widget_item and widget_item.widget():
-                    widget_item.widget().setEnabled(effective_enabled and not is_converting)
+        buttons_layout_item = self.chapter_list.parent().layout().itemAt(1)
+        if buttons_layout_item:
+            buttons_layout = buttons_layout_item.layout()
+            if buttons_layout:
+                for i in range(buttons_layout.count()):
+                    widget_item = buttons_layout.itemAt(i)
+                    if widget_item and widget_item.widget():
+                        widget_item.widget().setEnabled(effective_enabled_for_inputs)
 
-        self.temp_spin.setEnabled(effective_enabled and not is_converting)
-        self.select_output_btn.setEnabled(effective_enabled and not is_converting)
+        self.temp_spin.setEnabled(effective_enabled_for_inputs)
+        self.select_output_btn.setEnabled(effective_enabled_for_inputs)
 
-        # Start/Stop buttons depend on conversion state AND backend status
-        self.start_btn.setEnabled(effective_enabled and not is_converting)
-        self.stop_btn.setEnabled(effective_enabled and is_converting) # Stop only available if backend OK and running
+        # --- Special handling for Start/Stop buttons ---
+        # Start Button: Enabled only if backend is OK AND we are NOT converting
+        self.start_btn.setEnabled(backend_ok and not is_converting)
+        # Stop Button: Enabled only if backend is OK AND we ARE converting
+        self.stop_btn.setEnabled(backend_ok and is_converting)
 
-        # Update start button text
+        # --- Update Start Button Text ---
+        # This needs to reflect the state accurately
         if not backend_ok:
             self.start_btn.setText("Backend Error")
         elif is_converting:
             self.start_btn.setText("Converting...")
-        else:
+        else: # Not converting and backend is OK
             self.start_btn.setText("Start Conversion")
 
 
