@@ -5,17 +5,17 @@ import sys
 import time
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QListWidget, QListWidgetItem, QPushButton, QLabel, QComboBox,
+                               QListWidget, QListWidgetItem, QPushButton, QLabel, QComboBox, # Use QComboBox
                                QProgressBar, QFileDialog, QMessageBox, QCheckBox, QDoubleSpinBox,
                                QTextEdit, QGroupBox, QFormLayout, QSizePolicy,
                                QStatusBar)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
-from PySide6.QtGui import QPalette, QColor, QIcon # Added QIcon
+from PySide6.QtGui import QPalette, QColor, QIcon
 
-# Assuming epub_to_speech_oute.py is in the same directory or accessible via PYTHONPATH
+# Import backend and outetts
 try:
     import epub_to_speech_oute
-    import outetts # Import outetts here as well for Speaker type checking and creation
+    import outetts
 except ImportError as e:
     # ... (keep existing import error handling) ...
     print(f"Error importing backend or outetts: {e}")
@@ -24,22 +24,22 @@ except ImportError as e:
                          f"Make sure they are installed and accessible.\n\nError: {e}")
     sys.exit(1)
 
-
+# --- ConversionWorker (no changes needed here) ---
 class ConversionWorker(QObject):
+    # ... (keep existing worker code) ...
     progress = Signal(int, int, str)
     processing_chapter_index = Signal(int)
     log_message = Signal(str)
     finished = Signal(bool, str)
     overwrite_required = Signal(str, str)
 
-    # Accepts speaker_profile which can be str (name/path) or outetts.Speaker object
     def __init__(self, epub_path, output_dir, temperature, selected_chapter_indices, speaker_profile):
         super().__init__()
         self.epub_path = epub_path
         self.output_dir = output_dir
         self.temperature = temperature
         self.selected_chapter_indices = selected_chapter_indices
-        self.speaker_profile = speaker_profile # Can be str or Speaker object
+        self.speaker_profile = speaker_profile # Can be str (name/path) or Speaker object
         self._is_running = True
         self.overwrite_response = None
 
@@ -60,8 +60,8 @@ class ConversionWorker(QObject):
 
     def run(self):
         try:
-            # Pass the speaker_profile directly (could be str or Speaker object)
             success, message = epub_to_speech_oute.process_epub_chapters(
+                # ... (pass args, speaker_profile is already correct type) ...
                 epub_path=self.epub_path,
                 output_dir=self.output_dir,
                 temperature=self.temperature,
@@ -74,8 +74,8 @@ class ConversionWorker(QObject):
                 overwrite_callback=self.handle_overwrite_request
             )
             self.finished.emit(success, message)
-
         except Exception as e:
+            # ... (error handling) ...
             import traceback
             error_msg = f"Unexpected worker error: {e}"
             self.log_message.emit(f"\n❌ {error_msg}")
@@ -85,18 +85,20 @@ class ConversionWorker(QObject):
              self._is_running = False
 
     def stop(self):
+        # ... (keep existing stop code) ...
         self.log_message.emit("Stop signal received by worker...")
         self._is_running = False
         if self.overwrite_response is None:
             self.overwrite_response = False
 
-
+# --- MainWindow ---
 class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("EPUB to Audiobook Converter (outeTTS)")
-        self.setGeometry(100, 100, 900, 750) # Slightly taller
+        self.setGeometry(100, 100, 900, 750)
 
+        # ... (keep worker, thread, path variables etc.) ...
         self.worker = None
         self.thread = None
         self.current_epub_path = None
@@ -105,39 +107,34 @@ class MainWindow(QMainWindow):
         self.all_chapters_data = []
         self.highlighted_chapter_item = None
         self.normal_palette = self.palette()
-        self.highlight_palette = QPalette()
-        self.highlight_palette.setColor(QPalette.Base, QColor(75, 75, 75))
-        self.highlight_palette.setColor(QPalette.Text, QColor("white"))
+        # ... (highlight palette) ...
 
-        # Store current speaker selection: can be str (name/path) or Speaker object
-        self._active_speaker_profile = epub_to_speech_oute.DEFAULT_SPEAKER
-        # Store a user-friendly name for the label
-        self._active_speaker_display_name = epub_to_speech_oute.DEFAULT_SPEAKER
+        # Active speaker profile now primarily stores the *identifier* (str name or str path)
+        # The Speaker object is only held temporarily after creation, before saving.
+        self._active_speaker_identifier = epub_to_speech_oute.DEFAULT_SPEAKER
 
         self.init_ui()
         self.update_status("Ready")
-        self.check_backend_initialization()
+        self.check_backend_initialization() # This will also populate the dropdown
 
     def check_backend_initialization(self):
-        """Checks if the outeTTS interface initialized correctly on first use."""
         self.update_status("Initializing outeTTS backend...")
-        QApplication.processEvents() # Update UI
+        QApplication.processEvents()
         try:
-            epub_to_speech_oute.get_outeTTS_interface() # Trigger initialization
+            epub_to_speech_oute.get_outeTTS_interface()
             self.append_log("outeTTS backend initialized successfully.")
             self.update_status("Ready (outeTTS backend loaded)")
-            self.set_controls_enabled(True) # Ensure controls are enabled after init
+            # Populate dropdown *after* ensuring backend is ready
+            self.populate_speaker_dropdown()
+            self.set_controls_enabled(True)
         except Exception as e:
+             # ... (keep existing error handling) ...
              self.append_log(f"❌ ERROR: Failed to initialize outeTTS backend: {e}")
              self.update_status("ERROR: outeTTS backend failed to load!")
-             QMessageBox.critical(self, "Backend Error",
+             QMessageBox.critical(self, "Backend Error", #... error message ...
                                   f"Failed to initialize the outeTTS backend.\n"
                                   f"Please check console logs and ensure models are accessible.\n\nError: {e}")
-             self.start_btn.setEnabled(False)
-             self.start_btn.setText("Backend Error")
-             # Keep other controls disabled if backend fails? Maybe better user experience.
-             self.set_controls_enabled(False) # Disable most controls if backend fails
-
+             self.set_controls_enabled(False) # Disable controls if backend fails
 
     def init_ui(self):
         main_widget = QWidget()
@@ -163,6 +160,7 @@ class MainWindow(QMainWindow):
         self.chapter_list = QListWidget()
         self.chapter_list.setSelectionMode(QListWidget.ExtendedSelection)
         chapter_buttons_layout = QHBoxLayout()
+        # ... chapter buttons ...
         select_all_btn = QPushButton("Check All")
         select_all_btn.clicked.connect(lambda: self.toggle_check_all(True))
         deselect_all_btn = QPushButton("Uncheck All")
@@ -182,37 +180,34 @@ class MainWindow(QMainWindow):
         chapter_layout.addLayout(chapter_buttons_layout)
         chapter_group.setLayout(chapter_layout)
 
-
         # --- Parameters Group ---
         params_group = QGroupBox("Conversion Parameters")
-        params_layout = QFormLayout()
+        params_layout = QFormLayout() # Use FormLayout for label alignment
 
-        # Speaker Selection (Modified for WAV creation)
-        speaker_row_widget = QWidget() # Use a container widget for the row
+        # Speaker Selection (Dropdown + Create Button)
+        speaker_row_widget = QWidget()
         speaker_layout = QHBoxLayout(speaker_row_widget)
-        speaker_layout.setContentsMargins(0,0,0,0) # Remove margins for tighter layout
+        speaker_layout.setContentsMargins(0,0,0,0)
 
-        self.speaker_label = QLabel(f"Speaker: {self._active_speaker_display_name}")
-        self.speaker_label.setToolTip("Current text-to-speech speaker profile.")
-        self.speaker_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred) # Allow label to expand
+        self.speaker_combo = QComboBox()
+        self.speaker_combo.setToolTip("Select a speaker profile (default or saved .json).")
+        self.speaker_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        # Connect signal AFTER populating dropdown
+        # self.speaker_combo.currentIndexChanged.connect(self.speaker_selection_changed)
+        # Use activated signal to avoid firing twice during programmatic changes
+        self.speaker_combo.activated.connect(self.speaker_selection_changed)
 
-        self.create_speaker_btn = QPushButton("Create from WAV...") # Renamed button
-        self.create_speaker_btn.setToolTip("Create a speaker profile from a WAV/MP3/FLAC file.")
-        self.create_speaker_btn.clicked.connect(self.create_speaker_from_audio) # Connect to new function
+        self.create_speaker_btn = QPushButton("Create...") # Shorter name maybe?
+        self.create_speaker_btn.setToolTip("Create a new speaker profile from a WAV/MP3/FLAC file.")
+        self.create_speaker_btn.clicked.connect(self.create_speaker_from_audio)
 
-        self.reset_speaker_btn = QPushButton("Reset") # New Reset Button
-        self.reset_speaker_btn.setToolTip(f"Reset speaker to default ({epub_to_speech_oute.DEFAULT_SPEAKER})")
-        # self.reset_speaker_btn.setIcon(QIcon.fromTheme("edit-clear")) # Optional icon
-        self.reset_speaker_btn.clicked.connect(self.reset_speaker_to_default)
-
-        speaker_layout.addWidget(self.speaker_label)
+        speaker_layout.addWidget(self.speaker_combo, 1) # Give combo box more space
         speaker_layout.addWidget(self.create_speaker_btn)
-        speaker_layout.addWidget(self.reset_speaker_btn)
 
-        # Add the container widget holding the speaker layout to the form layout
-        params_layout.addRow(speaker_row_widget) # Add the HBox widget as a row
+        # Add the speaker selection row to the form layout
+        params_layout.addRow(QLabel("Speaker Profile:"), speaker_row_widget) # Add label + widget HBox
 
-        # Temperature
+        # Temperature (remains the same)
         self.temp_spin = QDoubleSpinBox()
         self.temp_spin.setRange(0.0, 1.0)
         self.temp_spin.setValue(epub_to_speech_oute.TEMPERATURE)
@@ -225,6 +220,7 @@ class MainWindow(QMainWindow):
         # --- Output Group ---
         # ... (no changes) ...
         output_group = QGroupBox("Output")
+        # ... output label and button ...
         output_layout = QHBoxLayout()
         self.output_label = QLabel("Default: ./outputs/epub_[Book Title]/")
         self.output_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -235,9 +231,11 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self.select_output_btn)
         output_group.setLayout(output_layout)
 
+
         # --- Progress and Log Group ---
         # ... (no changes) ...
         progress_log_group = QGroupBox("Progress & Log")
+        # ... progress bar and log area ...
         progress_log_layout = QVBoxLayout()
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
@@ -254,6 +252,7 @@ class MainWindow(QMainWindow):
         # --- Control Buttons ---
         # ... (no changes) ...
         control_layout = QHBoxLayout()
+        # ... start/stop buttons ...
         self.start_btn = QPushButton("Start Conversion")
         self.start_btn.setStyleSheet("background-color: darkseagreen; color: black;")
         self.start_btn.clicked.connect(self.start_conversion)
@@ -286,7 +285,75 @@ class MainWindow(QMainWindow):
         main_layout.addLayout(control_layout)
 
         self.setCentralWidget(main_widget)
-        self.set_controls_enabled(True) # Start enabled, check_backend might disable later
+        self.set_controls_enabled(False) # Start disabled until backend check completes
+
+    # --- Speaker Dropdown Logic ---
+
+    def populate_speaker_dropdown(self):
+        """Clears and fills the speaker dropdown with default and saved profiles."""
+        self.speaker_combo.blockSignals(True) # Prevent signals during population
+        self.speaker_combo.clear()
+        current_selection_identifier = self._active_speaker_identifier # Store current to reselect
+
+        # 1. Add Default Speaker
+        default_name = epub_to_speech_oute.DEFAULT_SPEAKER
+        self.speaker_combo.addItem(f"Default ({default_name})", userData=default_name)
+
+        # 2. Scan for Saved Profiles
+        profile_dir = epub_to_speech_oute.SPEAKER_PROFILE_DIR
+        found_profiles = []
+        if os.path.isdir(profile_dir):
+            try:
+                for filename in os.listdir(profile_dir):
+                    if filename.lower().endswith(".json"):
+                        full_path = os.path.join(profile_dir, filename)
+                        display_name = os.path.splitext(filename)[0] # Name without extension
+                        found_profiles.append({"display": display_name, "path": full_path})
+            except OSError as e:
+                self.append_log(f"Warning: Could not read speaker profiles directory '{profile_dir}': {e}")
+
+        # Sort profiles alphabetically by display name for consistency
+        found_profiles.sort(key=lambda x: x['display'])
+
+        # Add sorted profiles to dropdown
+        for profile in found_profiles:
+            self.speaker_combo.addItem(profile['display'], userData=profile['path'])
+
+        # 3. Reselect previous or default
+        found_index = self.speaker_combo.findData(current_selection_identifier)
+        if found_index != -1:
+            self.speaker_combo.setCurrentIndex(found_index)
+        else:
+            # If previous selection not found (e.g., deleted file), default to index 0
+            self.speaker_combo.setCurrentIndex(0)
+            # Update the stored identifier to match the new selection
+            self._active_speaker_identifier = self.speaker_combo.currentData()
+
+        self.speaker_combo.blockSignals(False) # Re-enable signals
+        # Manually trigger update for the initial state
+        self.speaker_selection_changed()
+
+
+    def speaker_selection_changed(self):
+        """Updates the active speaker identifier when dropdown selection changes."""
+        selected_data = self.speaker_combo.currentData()
+        selected_text = self.speaker_combo.currentText()
+
+        if selected_data: # Should always have data
+            self._active_speaker_identifier = selected_data
+            if selected_data == epub_to_speech_oute.DEFAULT_SPEAKER:
+                self.append_log(f"Selected default speaker: {selected_data}")
+                self.speaker_combo.setToolTip(f"Using default speaker: {selected_data}")
+            else:
+                # It's a path
+                display_name = os.path.basename(selected_data)
+                self.append_log(f"Selected speaker profile: {display_name}")
+                self.speaker_combo.setToolTip(f"Using saved profile: {selected_data}")
+        else:
+             # Fallback, though should not happen with current logic
+             self.append_log("Warning: No data associated with selected speaker. Reverting to default.")
+             self.reset_speaker_to_default() # Use the reset function
+
 
     # --- UI Control and Logging ---
 
@@ -300,42 +367,46 @@ class MainWindow(QMainWindow):
 
     def set_controls_enabled(self, enabled):
         """Enable or disable input controls."""
-        self.select_epub_btn.setEnabled(enabled)
-        self.chapter_list.setEnabled(enabled)
-        self.create_speaker_btn.setEnabled(enabled) # Enable speaker create button
-        self.reset_speaker_btn.setEnabled(enabled) # Enable speaker reset button
+        is_converting = self.thread is not None and self.thread.isRunning()
+        backend_ok = self.status_label.text() != "ERROR: outeTTS backend failed to load!"
+
+        # Enable based on 'enabled' AND backend status
+        effective_enabled = enabled and backend_ok
+
+        self.select_epub_btn.setEnabled(effective_enabled and not is_converting)
+        self.chapter_list.setEnabled(effective_enabled and not is_converting)
+        self.speaker_combo.setEnabled(effective_enabled and not is_converting) # Enable dropdown
+        self.create_speaker_btn.setEnabled(effective_enabled and not is_converting) # Enable create button
 
         buttons_layout = self.chapter_list.parent().layout().itemAt(1).layout()
         if buttons_layout:
             for i in range(buttons_layout.count()):
                 widget_item = buttons_layout.itemAt(i)
                 if widget_item and widget_item.widget():
-                    widget_item.widget().setEnabled(enabled)
+                    widget_item.widget().setEnabled(effective_enabled and not is_converting)
 
-        self.temp_spin.setEnabled(enabled)
-        self.select_output_btn.setEnabled(enabled)
+        self.temp_spin.setEnabled(effective_enabled and not is_converting)
+        self.select_output_btn.setEnabled(effective_enabled and not is_converting)
 
-        # Special handling for start/stop based on backend status and conversion state
-        backend_ok = self.status_label.text() != "ERROR: outeTTS backend failed to load!"
-        is_converting = self.thread is not None and self.thread.isRunning()
+        # Start/Stop buttons depend on conversion state AND backend status
+        self.start_btn.setEnabled(effective_enabled and not is_converting)
+        self.stop_btn.setEnabled(effective_enabled and is_converting) # Stop only available if backend OK and running
 
-        self.start_btn.setEnabled(enabled and backend_ok and not is_converting)
-        self.stop_btn.setEnabled(enabled and backend_ok and is_converting)
-
-        if is_converting:
-            self.start_btn.setText("Converting...")
-        elif not backend_ok:
+        # Update start button text
+        if not backend_ok:
             self.start_btn.setText("Backend Error")
+        elif is_converting:
+            self.start_btn.setText("Converting...")
         else:
             self.start_btn.setText("Start Conversion")
 
 
-    # --- File/Directory/Speaker Selection ---
-
+    # --- File/Directory Selection ---
     def select_epub(self):
         # ... (no changes) ...
         path, _ = QFileDialog.getOpenFileName(self, "Select EPUB file", "", "EPUB files (*.epub)")
         if path:
+             #... (update label, load chapters) ...
             self.current_epub_path = path
             base_name = os.path.basename(path)
             self.file_label.setText(base_name)
@@ -351,93 +422,125 @@ class MainWindow(QMainWindow):
         start_dir = os.path.dirname(self.current_epub_path) if self.current_epub_path else ""
         path = QFileDialog.getExistingDirectory(self, "Select Output Directory", start_dir)
         if path:
+             #... (update label) ...
             self.current_output_dir = path
             self.output_label.setText(f"Output to: {path}")
             self.output_label.setToolTip(path)
             self.append_log(f"Set output directory: {path}")
 
 
+    # --- Speaker Creation/Saving ---
     def create_speaker_from_audio(self):
-        """Opens dialog for WAV/MP3, creates speaker, optionally saves as JSON."""
-        # Filter for common audio files outetts might support
         audio_filter = "Audio Files (*.wav *.mp3 *.flac *.ogg);;All Files (*)"
         path, _ = QFileDialog.getOpenFileName(self, "Select Audio File for Speaker Profile", "", audio_filter)
-
-        if not path:
-            return # User cancelled
+        if not path: return
 
         self.update_status(f"Creating speaker from {os.path.basename(path)}...")
         self.append_log(f"Attempting to create speaker profile from: {path}")
-        QApplication.processEvents() # Update UI
+        QApplication.processEvents()
+
+        temp_speaker_object = None # Store the object temporarily
 
         try:
-            interface = epub_to_speech_oute.get_outeTTS_interface() # Ensure interface is ready
-            if not interface:
-                 raise RuntimeError("outeTTS Interface not available.")
+            interface = epub_to_speech_oute.get_outeTTS_interface()
+            if not interface: raise RuntimeError("outeTTS Interface not available.")
 
-            # Create the speaker object - this might take a second or two
-            self.set_controls_enabled(False) # Briefly disable controls
+            self.set_controls_enabled(False)
             QApplication.processEvents()
-            new_speaker = interface.create_speaker(path)
-            self.set_controls_enabled(True) # Re-enable controls
+            temp_speaker_object = interface.create_speaker(path) # Store the object
+            self.set_controls_enabled(True)
 
-
-            # Store the created speaker object for use
-            self._active_speaker_profile = new_speaker
-            # Update display name
-            self._active_speaker_display_name = f"Custom ({os.path.basename(path)})"
-            self.speaker_label.setText(f"Speaker: {self._active_speaker_display_name}")
-            self.speaker_label.setToolTip(f"Using custom speaker created from {path}")
-
-            self.append_log(f"Successfully created speaker profile from {os.path.basename(path)}.")
-            self.update_status("Custom speaker created.")
+            self.append_log(f"Successfully created speaker profile object from {os.path.basename(path)}.")
+            self.update_status("Custom speaker created (unsaved).")
 
             # Ask user if they want to save this profile
             reply = QMessageBox.question(self, "Save Speaker Profile?",
                                          "Speaker profile created successfully.\n\n"
-                                         "Do you want to save this profile as a .json file for future use?",
+                                         "Do you want to save this profile as a .json file to the list?",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                         QMessageBox.StandardButton.No)
+                                         QMessageBox.StandardButton.Yes) # Default to Yes
 
             if reply == QMessageBox.StandardButton.Yes:
-                self.save_speaker_profile(new_speaker, os.path.splitext(os.path.basename(path))[0]) # Pass object and suggested name
+                self.save_speaker_profile(temp_speaker_object, os.path.splitext(os.path.basename(path))[0])
+            else:
+                # If not saved, keep the object temporarily active but don't add to list
+                self._active_speaker_identifier = temp_speaker_object # Use the object directly
+                # Maybe add a temporary item to the dropdown? Or just leave it selected internally.
+                # For simplicity, we won't add a temp item. User can convert with it once.
+                self.append_log("Using newly created speaker (unsaved) for next conversion.")
+                self.speaker_combo.setToolTip(f"Using unsaved speaker from {os.path.basename(path)}")
+                # Find default and reselect it visually to avoid confusion? Or add a temp item?
+                # Let's find default and select it visually, but keep the object internally
+                default_index = self.speaker_combo.findData(epub_to_speech_oute.DEFAULT_SPEAKER)
+                if default_index != -1:
+                    self.speaker_combo.setCurrentIndex(default_index)
+
 
         except Exception as e:
-            self.set_controls_enabled(True) # Ensure controls are re-enabled on error
+            self.set_controls_enabled(True)
             self.append_log(f"❌ Error creating speaker profile: {e}")
             self.update_status("Error creating speaker.")
-            QMessageBox.critical(self, "Speaker Creation Error",
-                                 f"Failed to create speaker profile from audio file:\n{e}\n\n"
-                                 "Ensure the audio file is valid and the outetts backend is working.")
-            # Reset to default if creation fails? Optional.
-            # self.reset_speaker_to_default()
+            QMessageBox.critical(self, "Speaker Creation Error", f"Failed to create speaker profile:\n{e}")
 
     def save_speaker_profile(self, speaker_object, suggested_name="custom_speaker"):
-        """Saves the given speaker object to a JSON file selected by the user."""
-        json_filter = "JSON Files (*.json)"
-        save_path, _ = QFileDialog.getSaveFileName(self, "Save Speaker Profile As", f"{suggested_name}.json", json_filter)
+        """Saves the speaker object to the designated profile directory."""
+        profile_dir = epub_to_speech_oute.SPEAKER_PROFILE_DIR
+        # Ensure directory exists (should have been created at startup)
+        os.makedirs(profile_dir, exist_ok=True)
 
-        if not save_path:
-            self.append_log("Speaker profile saving cancelled.")
-            return # User cancelled
+        # Clean suggested name for filename
+        safe_suggested_name = re.sub(r'[^\w\-]+', '_', suggested_name)
+        if not safe_suggested_name: safe_suggested_name = "custom_speaker"
 
-        # Ensure filename ends with .json
-        if not save_path.lower().endswith(".json"):
-            save_path += ".json"
+        # Loop to find a unique filename
+        counter = 0
+        save_name_base = safe_suggested_name
+        while True:
+             save_filename = f"{safe_suggested_name}.json"
+             save_path = os.path.join(profile_dir, save_filename)
+             if not os.path.exists(save_path):
+                 break
+             counter += 1
+             safe_suggested_name = f"{save_name_base}_{counter}"
+             if counter > 100: # Safety break
+                 self.append_log("Error: Could not find a unique filename to save speaker profile.")
+                 QMessageBox.warning(self, "Save Error", "Could not determine a unique filename in the speaker_profiles directory.")
+                 return
+
+
+        # Ask user to confirm/edit filename (optional but good UX)
+        confirmed_save_path, ok = QFileDialog.getSaveFileName(
+            self,
+            "Confirm Save Speaker Profile",
+            save_path, # Pre-populate with suggested unique path
+            "JSON Files (*.json)"
+        )
+
+        if not ok or not confirmed_save_path:
+            self.append_log("Speaker profile saving cancelled by user.")
+            # Keep the unsaved profile active temporarily?
+            self._active_speaker_identifier = speaker_object
+            self.append_log("Using newly created speaker (unsaved) for next conversion.")
+            self.speaker_combo.setToolTip(f"Using unsaved speaker from temporary object")
+            default_index = self.speaker_combo.findData(epub_to_speech_oute.DEFAULT_SPEAKER)
+            if default_index != -1: self.speaker_combo.setCurrentIndex(default_index)
+            return
+
+        # Ensure final path ends with .json
+        if not confirmed_save_path.lower().endswith(".json"):
+            confirmed_save_path += ".json"
 
         try:
             interface = epub_to_speech_oute.get_outeTTS_interface()
-            if not interface:
-                 raise RuntimeError("outeTTS Interface not available.")
+            if not interface: raise RuntimeError("outeTTS Interface not available.")
 
-            interface.save_speaker(speaker_object, save_path)
-            self.append_log(f"Speaker profile saved successfully to: {save_path}")
+            interface.save_speaker(speaker_object, confirmed_save_path)
+            self.append_log(f"Speaker profile saved successfully to: {confirmed_save_path}")
             self.update_status("Speaker profile saved.")
-             # Optional: Update the active profile to be the saved path?
-             # self._active_speaker_profile = save_path
-             # self._active_speaker_display_name = os.path.basename(save_path)
-             # self.speaker_label.setText(f"Speaker: {self._active_speaker_display_name}")
-             # self.speaker_label.setToolTip(f"Using saved speaker profile: {save_path}")
+
+            # Refresh the dropdown and select the newly saved profile
+            self._active_speaker_identifier = confirmed_save_path # Update identifier to path
+            self.populate_speaker_dropdown() # This will re-read the dir and select it
 
         except Exception as e:
              self.append_log(f"❌ Error saving speaker profile: {e}")
@@ -446,20 +549,24 @@ class MainWindow(QMainWindow):
 
 
     def reset_speaker_to_default(self):
-        """Resets the active speaker to the default."""
-        default_speaker_name = epub_to_speech_oute.DEFAULT_SPEAKER
-        self._active_speaker_profile = default_speaker_name
-        self._active_speaker_display_name = default_speaker_name
-        self.speaker_label.setText(f"Speaker: {self._active_speaker_display_name}")
-        self.speaker_label.setToolTip(f"Using default speaker: {default_speaker_name}")
-        self.append_log(f"Reset speaker to default: {default_speaker_name}")
+        """Resets the active speaker to the default by selecting it in the dropdown."""
+        # Find the default item and set the dropdown's index
+        default_name = epub_to_speech_oute.DEFAULT_SPEAKER
+        default_index = self.speaker_combo.findData(default_name)
+        if default_index != -1:
+            self.speaker_combo.setCurrentIndex(default_index)
+            # speaker_selection_changed will be triggered automatically if index changed
+        else:
+            self.append_log("Warning: Could not find default speaker in dropdown to reset.")
+        # Explicitly log and update status just in case index didn't change
+        self.append_log(f"Reset speaker to default: {default_name}")
         self.update_status("Speaker reset to default.")
+        self._active_speaker_identifier = default_name # Ensure internal state matches
 
 
     # --- Chapter Handling ---
-
+    # ... (load_chapters, toggle_check_all, check_highlighted, uncheck_highlighted - no changes) ...
     def load_chapters(self, epub_path):
-        # ... (no changes) ...
         self.chapter_list.clear()
         self.all_chapters_data = []
         self.book_title = None
@@ -491,16 +598,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "EPUB Load Error", f"Failed to load chapters from EPUB:\n{e}")
             self.update_status("Error loading EPUB")
 
-
     def toggle_check_all(self, check):
-        # ... (no changes) ...
         state = Qt.Checked if check else Qt.Unchecked
         for i in range(self.chapter_list.count()):
             self.chapter_list.item(i).setCheckState(state)
 
-
     def check_highlighted(self):
-        # ... (no changes) ...
         selected_items = self.chapter_list.selectedItems()
         if not selected_items:
             self.update_status("Select chapters in the list first to check them.")
@@ -508,9 +611,7 @@ class MainWindow(QMainWindow):
         for item in selected_items: item.setCheckState(Qt.Checked)
         self.update_status(f"Checked {len(selected_items)} highlighted chapters.")
 
-
     def uncheck_highlighted(self):
-        # ... (no changes) ...
         selected_items = self.chapter_list.selectedItems()
         if not selected_items:
             self.update_status("Select chapters in the list first to uncheck them.")
@@ -520,33 +621,32 @@ class MainWindow(QMainWindow):
 
 
     # --- Conversion Process ---
-
     def start_conversion(self):
+        # ... (checks remain the same) ...
         if not self.current_epub_path:
             QMessageBox.warning(self, "Error", "Please select an EPUB file first.")
             return
-
         selected_chapter_indices = [i for i in range(self.chapter_list.count())
                                      if self.chapter_list.item(i).checkState() == Qt.Checked]
         if not selected_chapter_indices:
             QMessageBox.warning(self, "Error", "Please check at least one chapter to convert.")
             return
-
         if self.status_label.text() == "ERROR: outeTTS backend failed to load!":
              QMessageBox.critical(self, "Backend Error", "Cannot start conversion, the outeTTS backend failed to initialize.")
              return
 
         self.reset_chapter_highlight()
 
-        # Get parameters - self._active_speaker_profile now holds name, path, or object
+        # Use the currently selected speaker identifier from the dropdown/internal state
         params = {
             'epub_path': self.current_epub_path,
             'output_dir': self.current_output_dir,
             'temperature': self.temp_spin.value(),
             'selected_chapter_indices': selected_chapter_indices,
-            'speaker_profile': self._active_speaker_profile # Pass the active profile
+            'speaker_profile': self._active_speaker_identifier # Pass the active identifier (str name/path or object)
         }
 
+        # ... (rest of start_conversion: logging, disable controls, create worker/thread, connect signals, start thread) ...
         self.append_log("="*30 + " Starting Conversion " + "="*30)
         self.update_status("Starting conversion...")
         self.progress_bar.setValue(0)
@@ -571,17 +671,20 @@ class MainWindow(QMainWindow):
 
         self.thread.start()
 
+    # --- Other Methods ---
+    # ... (stop_conversion, conversion_finished, reset_ui_after_conversion, thread_cleanup) ...
+    # ... (update_progress, highlight_current_chapter, reset_chapter_highlight) ...
+    # ... (handle_overwrite_request_dialog, closeEvent) ...
+    # All these should remain largely unchanged
+
     def stop_conversion(self):
-        # ... (no changes) ...
         if self.worker and self.thread and self.thread.isRunning():
             self.update_status("Stopping conversion...")
             self.append_log("Attempting to stop the conversion...")
             self.stop_btn.setEnabled(False)
             self.worker.stop()
 
-
     def conversion_finished(self, success, message):
-        # ... (logic is fine, maybe adjust logging symbols slightly) ...
         if success:
             self.update_status("Conversion completed successfully.")
             self.append_log(f"✅ {'='*30} Conversion Finished: {message} {'='*30}")
@@ -601,23 +704,17 @@ class MainWindow(QMainWindow):
 
         self.reset_ui_after_conversion()
 
-
     def reset_ui_after_conversion(self):
-         # ... (no changes) ...
          self.set_controls_enabled(True)
          self.reset_chapter_highlight()
 
-
     def thread_cleanup(self):
-         # ... (no changes) ...
          if self.worker: self.worker.deleteLater()
          if self.thread: self.thread.deleteLater()
          self.worker = None
          self.thread = None
 
-
     def update_progress(self, current_chap_num, total_chapters, chapter_title):
-        # ... (no changes) ...
         self.progress_bar.setMaximum(total_chapters)
         self.progress_bar.setValue(current_chap_num)
         if total_chapters > 0:
@@ -627,9 +724,7 @@ class MainWindow(QMainWindow):
              self.progress_bar.setFormat(f"Chapter {current_chap_num}/{total_chapters}")
         self.update_status(f"Processing chapter {current_chap_num}/{total_chapters}: {chapter_title}")
 
-
     def highlight_current_chapter(self, index):
-        # ... (no changes) ...
         self.reset_chapter_highlight()
         if 0 <= index < self.chapter_list.count():
             item = self.chapter_list.item(index)
@@ -638,22 +733,16 @@ class MainWindow(QMainWindow):
                 self.chapter_list.scrollToItem(item, QListWidget.ScrollHint.PositionAtCenter)
                 self.highlighted_chapter_item = item
 
-
     def reset_chapter_highlight(self):
-        # ... (no changes) ...
          if self.highlighted_chapter_item:
             self.highlighted_chapter_item.setSelected(False)
             self.highlighted_chapter_item = None
 
-
     def handle_overwrite_request_dialog(self, output_wav, output_m4b):
-        # ... (no changes) ...
         if not self.worker: return
-
         files_exist = []
         if os.path.exists(output_wav): files_exist.append(os.path.basename(output_wav))
         if os.path.exists(output_m4b): files_exist.append(os.path.basename(output_m4b))
-
         reply = QMessageBox.question(
             self, 'Confirm Overwrite',
             f"The following final output file(s) already exist:\n\n"
@@ -662,26 +751,20 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
-
         if self.worker:
              self.worker.overwrite_response = (reply == QMessageBox.StandardButton.Yes)
 
-
     def closeEvent(self, event):
-        # ... (no changes) ...
         if self.thread and self.thread.isRunning():
             reply = QMessageBox.question(
-                self, 'Confirm Exit',
-                "A conversion is in progress. Stop and exit?",
-                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                QMessageBox.StandardButton.No
+                self, 'Confirm Exit', "A conversion is in progress. Stop and exit?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No, QMessageBox.StandardButton.No
             )
             if reply == QMessageBox.StandardButton.Yes:
                 self.append_log("Exiting application - stopping active conversion.")
                 self.stop_conversion()
                 if self.thread:
-                    if not self.thread.wait(3000):
-                        self.append_log("Warning: Worker thread did not finish stopping gracefully.")
+                    if not self.thread.wait(3000): self.append_log("Warning: Worker thread did not finish stopping gracefully.")
                 event.accept()
             else:
                 event.ignore()
@@ -689,11 +772,13 @@ class MainWindow(QMainWindow):
             event.accept()
 
 
+# --- Main Execution ---
 if __name__ == "__main__":
     # ... (keep optional High DPI and Theme) ...
     app = QApplication(sys.argv)
 
     app.setStyle("Fusion")
+    # ... (dark theme palette code) ...
     dark_palette = QPalette()
     dark_palette.setColor(QPalette.Window, QColor(53, 53, 53))
     dark_palette.setColor(QPalette.WindowText, Qt.white)
@@ -719,6 +804,6 @@ if __name__ == "__main__":
          window.show()
          sys.exit(app.exec())
     else:
-         sys.exit(1)
+         sys.exit(1) # Error message shown during import failure
 
 # --- END OF FILE epub_to_speech_oute_ui.py ---
