@@ -91,7 +91,7 @@ def html_to_text(html_content):
     return text.strip()
 
 def extract_chapters_from_epub(epub_path):
-    """Extract chapters from an EPUB file."""
+    """Extract chapters from an EPUB file, trying multiple ways to get item paths."""
     try:
         book = epub.read_epub(epub_path)
         book_title = book.get_metadata('DC', 'title')
@@ -101,93 +101,186 @@ def extract_chapters_from_epub(epub_path):
             book_title = os.path.basename(epub_path).replace('.epub', '')
 
         print(f"Processing book: {book_title}")
-        chapters = []
+        chapters = [] # Temporarily store all extracted chapters here
         items_to_process = [item for item in book.get_items() if item.get_type() == ebooklib.ITEM_DOCUMENT]
 
-        # Try to get chapter titles from TOC first
-        toc_titles = {item.href: item.title for item in book.toc}
+        # Create a mapping from various identifiers (href, name, filename) to TOC titles
+        toc_titles = {}
+        for item in book.toc:
+            title = item.title
+            if not title or len(title.strip()) < 3:
+                 continue # Skip empty or very short TOC titles
+            # Store title against potential keys
+            if hasattr(item, 'href') and item.href:
+                toc_titles[item.href] = title
+            # Sometimes TOC might use other identifiers, try adding name if different
+            if hasattr(item, 'get_name') and item.get_name() and item.get_name() != getattr(item, 'href', None):
+                 toc_titles[item.get_name()] = title
+
 
         print(f"Found {len(items_to_process)} potential content documents.")
 
+        # --- First Pass: Extract all potential chapter content and metadata ---
         for i, item in enumerate(items_to_process):
+            item_id = item.get_id()
+            item_name = item.get_name() # Often same as href or file_name
+            item_file_name = getattr(item, 'file_name', None) # Use getattr for safety
+
+            # --- Try harder to find a usable path (href/name) ---
+            item_href = None
+            if hasattr(item, 'href') and item.href:
+                item_href = item.href
+            elif item_name: # Fallback to get_name()
+                print(f"  Info: Item {i+1} ('{item_id}') missing 'href', trying get_name(): '{item_name}'")
+                # Basic check if name looks like a path
+                if '/' in item_name or '.' in item_name:
+                     item_href = item_name
+                # else: # Commented out: file_name is often redundant with get_name
+                #    if item_file_name:
+                #        print(f"  Info: Item {i+1} ('{item_id}') get_name() unsuitable, trying file_name: '{item_file_name}'")
+                #        if '/' in item_file_name or '.' in item_file_name:
+                #             item_href = item_file_name
+
+            if not item_href:
+                print(f"  Skipping item {i+1} ('{item_id}', Name: '{item_name}'): Could not determine a valid path (href/name).")
+                # You could print dir(item) here for deep debugging if needed:
+                # print(f"Available attributes for skipped item: {dir(item)}")
+                continue
+            # --- End Path Finding ---
+
             try:
                 content = item.get_content().decode('utf-8', errors='ignore')
                 soup = BeautifulSoup(content, 'html.parser')
-                item_text = html_to_text(content) # Convert early to check length
+                item_text = html_to_text(content)
 
-                # Basic filtering (adjust thresholds as needed)
-                if len(item_text) < 200:
-                    # print(f"  Skipping item {i+1} ({item.get_name()}): Too short ({len(item_text)} chars)")
+                if len(item_text) < 100:
+                    # print(f"  Skipping item {i+1} ('{item_name}', Path: {item_href}): Too short ({len(item_text)} chars)")
                     continue
 
-                 # Determine Chapter Title
+                # Determine Chapter Title
                 chapter_title = None
-                # 1. Check TOC
-                if item.href in toc_titles:
-                    chapter_title = toc_titles[item.href]
+                # 1. Check TOC using the determined item_href or item_name
+                if item_href in toc_titles:
+                    chapter_title = toc_titles[item_href]
+                elif item_name in toc_titles: # Check name as well
+                     chapter_title = toc_titles[item_name]
 
                 # 2. Check for headings in content if TOC didn't provide a good title
-                if not chapter_title or chapter_title.lower() == "untitled" or len(chapter_title) < 3:
+                if not chapter_title or len(chapter_title) < 3:
                     title_tag = soup.find(['h1', 'h2', 'h3', 'h4'])
                     if title_tag:
                         potential_title = title_tag.get_text(strip=True)
-                        if len(potential_title) > 2: # Avoid very short headings
+                        if potential_title and len(potential_title) > 2:
                             chapter_title = potential_title
 
-
-                # 3. Fallback to item name or generic title
-                if not chapter_title or chapter_title.lower() == "untitled" or len(chapter_title) < 3:
-                    if item.get_name() and len(item.get_name()) > 3:
-                         chapter_title = item.get_name()
+                # 3. Fallback
+                if not chapter_title or len(chapter_title) < 3:
+                    potential_title = os.path.splitext(os.path.basename(item_name))[0]
+                    potential_title = potential_title.replace('_', ' ').replace('-', ' ').strip()
+                    if potential_title and len(potential_title) > 3 and not potential_title.lower().startswith("split") and not potential_title.lower().startswith("part"):
+                         chapter_title = potential_title.title()
                     else:
-                         chapter_title = f"Chapter {len(chapters) + 1}" # Use current chapter count
+                         chapter_title = f"Chapter {len(chapters) + 1}"
 
-                # Clean up title
-                chapter_title = chapter_title.strip()
-                # Remove excessive whitespace within the title
-                chapter_title = re.sub(r'\s+', ' ', chapter_title)
+                chapter_title = re.sub(r'\s+', ' ', chapter_title).strip()
 
+                # Append chapter data using the determined path
                 chapters.append({
-                    'id': item.get_id(),
-                    'href': item.href,
+                    'id': item_id,
+                    'href': item_href, # Store the path we actually found
                     'title': chapter_title,
                     'content': item_text
                 })
-                print(f"  Extracted chapter {len(chapters)}: '{chapter_title}' ({len(item_text)} chars)")
+                # print(f"  Extracted potential chapter {len(chapters)}: '{chapter_title}' ({len(item_text)} chars, Path: {item_href})")
 
             except Exception as item_exc:
-                 print(f"  Warning: Could not process item {item.get_name()}: {item_exc}")
-                 continue # Skip this item
+                 print(f"  Warning: Could not process content of item {i+1} ('{item_name}', Path: {item_href}): {item_exc}")
+                 continue # Skip this item's content processing
 
+        print(f"Initial extraction found {len(chapters)} potential chapters.")
+        if not chapters:
+             print("Warning: No valid chapter content extracted in the first pass.")
+             return book_title, []
 
-        # Attempt to reorder chapters based on the book's spine
+        # --- Second Pass: Attempt to order chapters based on the book's spine ---
         ordered_chapters = []
-        spine_hrefs = [item[0].href for item in book.spine]
         processed_hrefs = set()
 
-        # Add chapters in spine order
-        for href in spine_hrefs:
-            for chapter in chapters:
-                if chapter['href'] == href and href not in processed_hrefs:
-                    ordered_chapters.append(chapter)
-                    processed_hrefs.add(href)
-                    break
+        try:
+            print("Attempting to process spine for chapter order...")
+            spine_path_order = [] # Store paths (href or name) from spine
+            for spine_entry in book.spine:
+                item_id = None
+                item = None
+                spine_path = None
 
-        # Add any remaining chapters that weren't in the spine (e.g., appendix, notes)
+                if isinstance(spine_entry, tuple) and len(spine_entry) > 0: item_id = spine_entry[0]
+                elif isinstance(spine_entry, str): item_id = spine_entry
+
+                if isinstance(item_id, str): item = book.get_item_with_id(item_id)
+
+                if item:
+                    # Apply the same path finding logic to the item from the spine
+                    if hasattr(item, 'href') and item.href:
+                        spine_path = item.href
+                    elif item.get_name():
+                         # Check if name looks like a path
+                         if '/' in item.get_name() or '.' in item.get_name():
+                             spine_path = item.get_name()
+
+                if spine_path:
+                    spine_path_order.append(spine_path)
+                    # print(f"  Spine item found: ID='{item_id}', Path='{spine_path}'")
+                # elif item_id:
+                    # print(f"  Warning: Could not find item or usable path for spine ID '{item_id}'")
+
+
+            if spine_path_order:
+                print(f"Processing {len(spine_path_order)} items found in spine order.")
+                # Add chapters matching the spine order (using the determined 'href' stored in chapter dict)
+                for path in spine_path_order:
+                    found_chapter = None
+                    for chapter in chapters:
+                        if chapter['href'] == path: # Match by the stored path
+                            found_chapter = chapter
+                            break
+
+                    if found_chapter and found_chapter['href'] not in processed_hrefs:
+                        ordered_chapters.append(found_chapter)
+                        processed_hrefs.add(found_chapter['href'])
+                        # print(f"  Ordered chapter from spine: {found_chapter['title']} ({path})")
+                    # else:
+                        # print(f"  Chapter with path '{path}' from spine not found or already processed.")
+            else:
+                 print("No valid items could be ordered based on the spine content.")
+
+        except Exception as spine_exc:
+            print(f"Warning: Error processing EPUB spine for ordering: {spine_exc}. Falling back.")
+            ordered_chapters = []
+            processed_hrefs = set()
+
+        # --- Fallback / Append Remaining ---
+        initial_ordered_count = len(ordered_chapters)
         for chapter in chapters:
             if chapter['href'] not in processed_hrefs:
-                 print(f"  Appending chapter not found in spine: {chapter['title']} ({chapter['href']})")
                  ordered_chapters.append(chapter)
-                 processed_hrefs.add(chapter['href']) # Should be added already but ensure
+                 processed_hrefs.add(chapter['href'])
 
-
+        # Final checks and logging (same as before)
         if not ordered_chapters and chapters:
-             print("Warning: Could not order chapters based on spine, using extracted order.")
+             print("Warning: Spine ordering failed or produced no results. Using original extracted order.")
              ordered_chapters = chapters
+        elif len(ordered_chapters) > initial_ordered_count:
+             print(f"Appended {len(ordered_chapters) - initial_ordered_count} chapters not ordered by spine.")
+        elif len(ordered_chapters) < len(chapters):
+             print(f"Warning: Final chapter count ({len(ordered_chapters)}) is less than initial extraction count ({len(chapters)}). Some chapters might be missing.")
+        elif len(ordered_chapters) == len(chapters) and initial_ordered_count == 0:
+             print("Used original extracted order (spine processing yielded no order).")
 
 
-        print(f"Successfully extracted {len(ordered_chapters)} chapters.")
-        return book_title, ordered_chapters
+        final_chapters = ordered_chapters
+        print(f"Successfully extracted and ordered {len(final_chapters)} chapters.")
+        return book_title, final_chapters
 
     except Exception as e:
         import traceback
