@@ -1,0 +1,1 @@
+.\venv\Scripts\python.exe epub_to_speech_ui.py

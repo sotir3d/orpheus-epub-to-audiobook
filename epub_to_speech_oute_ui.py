@@ -3,11 +3,12 @@
 import os
 import sys
 import time
+import re # Import re for speaker saving filename cleaning
 from datetime import datetime
 from PySide6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout,
-                               QListWidget, QListWidgetItem, QPushButton, QLabel, QComboBox, # Use QComboBox
+                               QListWidget, QListWidgetItem, QPushButton, QLabel, QComboBox,
                                QProgressBar, QFileDialog, QMessageBox, QCheckBox, QDoubleSpinBox,
-                               QTextEdit, QGroupBox, QFormLayout, QSizePolicy,
+                               QTextEdit, QGroupBox, QFormLayout, QSizePolicy, QSpinBox, # Added QSpinBox
                                QStatusBar)
 from PySide6.QtCore import Qt, QThread, Signal, QObject, QTimer
 from PySide6.QtGui import QPalette, QColor, QIcon
@@ -17,29 +18,28 @@ try:
     import epub_to_speech_oute
     import outetts
 except ImportError as e:
-    # ... (keep existing import error handling) ...
     print(f"Error importing backend or outetts: {e}")
     app = QApplication([])
     QMessageBox.critical(None, "Import Error", "Failed to import backend script or outetts library.\n"
                          f"Make sure they are installed and accessible.\n\nError: {e}")
     sys.exit(1)
 
-# --- ConversionWorker (no changes needed here) ---
+# --- ConversionWorker ---
 class ConversionWorker(QObject):
-    # ... (keep existing worker code) ...
     progress = Signal(int, int, str)
     processing_chapter_index = Signal(int)
     log_message = Signal(str)
     finished = Signal(bool, str)
     overwrite_required = Signal(str, str)
 
-    def __init__(self, epub_path, output_dir, temperature, selected_chapter_indices, speaker_profile):
+    # Accept sampler_options dictionary
+    def __init__(self, epub_path, output_dir, selected_chapter_indices, speaker_profile, sampler_options):
         super().__init__()
         self.epub_path = epub_path
         self.output_dir = output_dir
-        self.temperature = temperature
         self.selected_chapter_indices = selected_chapter_indices
-        self.speaker_profile = speaker_profile # Can be str (name/path) or Speaker object
+        self.speaker_profile = speaker_profile
+        self.sampler_options = sampler_options # Store the dictionary
         self._is_running = True
         self.overwrite_response = None
 
@@ -61,12 +61,11 @@ class ConversionWorker(QObject):
     def run(self):
         try:
             success, message = epub_to_speech_oute.process_epub_chapters(
-                # ... (pass args, speaker_profile is already correct type) ...
                 epub_path=self.epub_path,
                 output_dir=self.output_dir,
-                temperature=self.temperature,
                 selected_chapter_indices=self.selected_chapter_indices,
-                speaker_profile=self.speaker_profile, # Pass it here
+                speaker_profile=self.speaker_profile,
+                sampler_options=self.sampler_options, # Pass the dictionary
                 log_callback=self.log_message.emit,
                 progress_callback=self.progress.emit,
                 processing_chapter_callback=self.processing_chapter_index.emit,
@@ -75,7 +74,6 @@ class ConversionWorker(QObject):
             )
             self.finished.emit(success, message)
         except Exception as e:
-            # ... (error handling) ...
             import traceback
             error_msg = f"Unexpected worker error: {e}"
             self.log_message.emit(f"\n❌ {error_msg}")
@@ -85,7 +83,6 @@ class ConversionWorker(QObject):
              self._is_running = False
 
     def stop(self):
-        # ... (keep existing stop code) ...
         self.log_message.emit("Stop signal received by worker...")
         self._is_running = False
         if self.overwrite_response is None:
@@ -96,9 +93,8 @@ class MainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         self.setWindowTitle("EPUB to Audiobook Converter (outeTTS)")
-        self.setGeometry(100, 100, 900, 750)
+        self.setGeometry(100, 100, 1000, 700) # Example: 1000 width, 700 height
 
-        # ... (keep worker, thread, path variables etc.) ...
         self.worker = None
         self.thread = None
         self.current_epub_path = None
@@ -107,15 +103,24 @@ class MainWindow(QMainWindow):
         self.all_chapters_data = []
         self.highlighted_chapter_item = None
         self.normal_palette = self.palette()
-        # ... (highlight palette) ...
 
-        # Active speaker profile now primarily stores the *identifier* (str name or str path)
-        # The Speaker object is only held temporarily after creation, before saving.
         self._active_speaker_identifier = epub_to_speech_oute.DEFAULT_SPEAKER
+
+        # Get default sampler values from backend (or define defaults here matching backend)
+        self.default_sampler_options = {
+            "temperature": epub_to_speech_oute.DEFAULT_TEMPERATURE,
+            "repetition_penalty": epub_to_speech_oute.DEFAULT_REPETITION_PENALTY,
+            "top_k": epub_to_speech_oute.DEFAULT_TOP_K,
+            "top_p": epub_to_speech_oute.DEFAULT_TOP_P,
+            "min_p": epub_to_speech_oute.DEFAULT_MIN_P,
+            "mirostat": epub_to_speech_oute.DEFAULT_MIROSTAT,
+            "mirostat_tau": epub_to_speech_oute.DEFAULT_MIROSTAT_TAU,
+            "mirostat_eta": epub_to_speech_oute.DEFAULT_MIROSTAT_ETA,
+        }
 
         self.init_ui()
         self.update_status("Ready")
-        self.check_backend_initialization() # This will also populate the dropdown
+        self.check_backend_initialization()
 
     def check_backend_initialization(self):
         self.update_status("Initializing outeTTS backend...")
@@ -124,24 +129,32 @@ class MainWindow(QMainWindow):
             epub_to_speech_oute.get_outeTTS_interface()
             self.append_log("outeTTS backend initialized successfully.")
             self.update_status("Ready (outeTTS backend loaded)")
-            # Populate dropdown *after* ensuring backend is ready
             self.populate_speaker_dropdown()
             self.set_controls_enabled(True)
         except Exception as e:
-             # ... (keep existing error handling) ...
              self.append_log(f"❌ ERROR: Failed to initialize outeTTS backend: {e}")
              self.update_status("ERROR: outeTTS backend failed to load!")
-             QMessageBox.critical(self, "Backend Error", #... error message ...
+             QMessageBox.critical(self, "Backend Error",
                                   f"Failed to initialize the outeTTS backend.\n"
                                   f"Please check console logs and ensure models are accessible.\n\nError: {e}")
-             self.set_controls_enabled(False) # Disable controls if backend fails
+             self.set_controls_enabled(False)
 
     def init_ui(self):
         main_widget = QWidget()
+        # Overall vertical layout for the main widget's content + control buttons
         main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(10, 10, 10, 10) # Add some padding
+        main_layout.setSpacing(10) # Add spacing between major elements
+
+        # --- Top Horizontal Splitter ---
+        top_h_layout = QHBoxLayout()
+        top_h_layout.setSpacing(10)
+
+        # === Left Vertical Column ===
+        left_v_layout = QVBoxLayout()
+        left_v_layout.setSpacing(10)
 
         # --- File Selection Group ---
-        # ... (no changes) ...
         file_group = QGroupBox("EPUB File")
         file_layout = QHBoxLayout()
         self.file_label = QLabel("No EPUB file selected")
@@ -152,15 +165,15 @@ class MainWindow(QMainWindow):
         file_layout.addWidget(self.file_label)
         file_layout.addWidget(self.select_epub_btn)
         file_group.setLayout(file_layout)
+        left_v_layout.addWidget(file_group)
 
         # --- Chapters Group ---
-        # ... (no changes) ...
         chapter_group = QGroupBox("Chapters")
         chapter_layout = QVBoxLayout()
         self.chapter_list = QListWidget()
         self.chapter_list.setSelectionMode(QListWidget.ExtendedSelection)
+        self.chapter_list.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding) # Allow chapter list to expand
         chapter_buttons_layout = QHBoxLayout()
-        # ... chapter buttons ...
         select_all_btn = QPushButton("Check All")
         select_all_btn.clicked.connect(lambda: self.toggle_check_all(True))
         deselect_all_btn = QPushButton("Uncheck All")
@@ -179,48 +192,111 @@ class MainWindow(QMainWindow):
         chapter_layout.addWidget(self.chapter_list)
         chapter_layout.addLayout(chapter_buttons_layout)
         chapter_group.setLayout(chapter_layout)
+        left_v_layout.addWidget(chapter_group) # Add chapter group to left column
 
-        # --- Parameters Group ---
+        # Add Left Layout to Top Horizontal Layout
+        top_h_layout.addLayout(left_v_layout, stretch=3) # Give chapters more horizontal space initially
+
+        # === Right Vertical Column ===
+        right_v_layout = QVBoxLayout()
+        right_v_layout.setSpacing(10)
+
+        # --- Parameters Group (with internal split) ---
         params_group = QGroupBox("Conversion Parameters")
-        params_layout = QFormLayout() # Use FormLayout for label alignment
+        params_outer_v_layout = QVBoxLayout(params_group) # Use QVBoxLayout for group
 
-        # Speaker Selection (Dropdown + Create Button)
+        # Speaker Row (stays at top of parameters)
         speaker_row_widget = QWidget()
         speaker_layout = QHBoxLayout(speaker_row_widget)
         speaker_layout.setContentsMargins(0,0,0,0)
-
         self.speaker_combo = QComboBox()
         self.speaker_combo.setToolTip("Select a speaker profile (default or saved .json).")
         self.speaker_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
-        # Connect signal AFTER populating dropdown
-        # self.speaker_combo.currentIndexChanged.connect(self.speaker_selection_changed)
-        # Use activated signal to avoid firing twice during programmatic changes
         self.speaker_combo.activated.connect(self.speaker_selection_changed)
-
-        self.create_speaker_btn = QPushButton("Create...") # Shorter name maybe?
+        self.create_speaker_btn = QPushButton("Create...")
         self.create_speaker_btn.setToolTip("Create a new speaker profile from a WAV/MP3/FLAC file.")
         self.create_speaker_btn.clicked.connect(self.create_speaker_from_audio)
-
-        speaker_layout.addWidget(self.speaker_combo, 1) # Give combo box more space
+        speaker_layout.addWidget(QLabel("Speaker Profile:"), 0, Qt.AlignLeft) # Add label here
+        speaker_layout.addWidget(self.speaker_combo, 1)
         speaker_layout.addWidget(self.create_speaker_btn)
+        params_outer_v_layout.addWidget(speaker_row_widget)
 
-        # Add the speaker selection row to the form layout
-        params_layout.addRow(QLabel("Speaker Profile:"), speaker_row_widget) # Add label + widget HBox
+        # Horizontal layout for the two columns of samplers
+        sampler_h_layout = QHBoxLayout()
+        sampler_h_layout.setSpacing(15) # Spacing between sampler columns
 
-        # Temperature (remains the same)
+        # Sampler Column 1 (Form Layout)
+        sampler_form_left = QFormLayout()
+        sampler_form_left.setSpacing(8)
         self.temp_spin = QDoubleSpinBox()
-        self.temp_spin.setRange(0.0, 1.0)
-        self.temp_spin.setValue(epub_to_speech_oute.TEMPERATURE)
+        self.temp_spin.setRange(0.0, 2.0)
+        self.temp_spin.setValue(self.default_sampler_options["temperature"])
         self.temp_spin.setSingleStep(0.05)
-        self.temp_spin.setToolTip("Controls randomness. Lower values are more deterministic (0.0-1.0).")
-        params_layout.addRow(QLabel("Temperature:"), self.temp_spin)
+        self.temp_spin.setToolTip("Controls randomness. Higher values increase diversity (0.0-2.0).")
+        sampler_form_left.addRow(QLabel("Temperature:"), self.temp_spin)
 
-        params_group.setLayout(params_layout)
+        self.rep_penalty_spin = QDoubleSpinBox()
+        self.rep_penalty_spin.setRange(0.0, 5.0)
+        self.rep_penalty_spin.setValue(self.default_sampler_options["repetition_penalty"])
+        self.rep_penalty_spin.setSingleStep(0.05)
+        self.rep_penalty_spin.setToolTip("Penalizes repeating sequences. Higher values reduce repetition (e.g., 1.0-1.5).")
+        sampler_form_left.addRow(QLabel("Repetition Penalty:"), self.rep_penalty_spin)
+
+        self.top_k_spin = QSpinBox()
+        self.top_k_spin.setRange(0, 200)
+        self.top_k_spin.setValue(self.default_sampler_options["top_k"])
+        self.top_k_spin.setToolTip("Consider only the top K most likely tokens (0 = disabled).")
+        sampler_form_left.addRow(QLabel("Top-K:"), self.top_k_spin)
+
+        self.top_p_spin = QDoubleSpinBox()
+        self.top_p_spin.setRange(0.0, 1.0)
+        self.top_p_spin.setValue(self.default_sampler_options["top_p"])
+        self.top_p_spin.setSingleStep(0.01)
+        self.top_p_spin.setToolTip("Consider tokens comprising the top P probability mass (0.0-1.0).")
+        sampler_form_left.addRow(QLabel("Top-P:"), self.top_p_spin)
+
+        sampler_h_layout.addLayout(sampler_form_left)
+
+        # Sampler Column 2 (Form Layout)
+        sampler_form_right = QFormLayout()
+        sampler_form_right.setSpacing(8)
+        self.min_p_spin = QDoubleSpinBox()
+        self.min_p_spin.setRange(0.0, 1.0)
+        self.min_p_spin.setValue(self.default_sampler_options["min_p"])
+        self.min_p_spin.setSingleStep(0.01)
+        self.min_p_spin.setToolTip("Minimum probability for a token to be considered (0.0-1.0).")
+        sampler_form_right.addRow(QLabel("Min-P:"), self.min_p_spin)
+
+        self.mirostat_check = QCheckBox()
+        self.mirostat_check.setChecked(self.default_sampler_options["mirostat"])
+        self.mirostat_check.setToolTip("Enable Mirostat sampling algorithm.")
+        self.mirostat_check.stateChanged.connect(self.update_mirostat_controls)
+        sampler_form_right.addRow(QLabel("Use Mirostat:"), self.mirostat_check)
+
+        self.mirostat_tau_spin = QDoubleSpinBox()
+        self.mirostat_tau_spin.setRange(0.0, 10.0)
+        self.mirostat_tau_spin.setValue(self.default_sampler_options["mirostat_tau"])
+        self.mirostat_tau_spin.setSingleStep(0.1)
+        self.mirostat_tau_spin.setToolTip("Mirostat learning target.")
+        sampler_form_right.addRow(QLabel("Mirostat Tau:"), self.mirostat_tau_spin)
+
+        self.mirostat_eta_spin = QDoubleSpinBox()
+        self.mirostat_eta_spin.setRange(0.0, 1.0)
+        self.mirostat_eta_spin.setValue(self.default_sampler_options["mirostat_eta"])
+        self.mirostat_eta_spin.setSingleStep(0.01)
+        self.mirostat_eta_spin.setToolTip("Mirostat learning rate.")
+        sampler_form_right.addRow(QLabel("Mirostat Eta:"), self.mirostat_eta_spin)
+
+        sampler_h_layout.addLayout(sampler_form_right)
+
+        # Add the sampler horizontal layout to the parameter group's outer layout
+        params_outer_v_layout.addLayout(sampler_h_layout)
+        self.update_mirostat_controls() # Initial update for Mirostat controls
+
+        right_v_layout.addWidget(params_group) # Add parameters group to right column
 
         # --- Output Group ---
-        # ... (no changes) ...
         output_group = QGroupBox("Output")
-        # ... output label and button ...
         output_layout = QHBoxLayout()
         self.output_label = QLabel("Default: ./outputs/epub_[Book Title]/")
         self.output_label.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
@@ -230,34 +306,37 @@ class MainWindow(QMainWindow):
         output_layout.addWidget(self.output_label)
         output_layout.addWidget(self.select_output_btn)
         output_group.setLayout(output_layout)
-
+        right_v_layout.addWidget(output_group) # Add output group to right column
 
         # --- Progress and Log Group ---
-        # ... (no changes) ...
         progress_log_group = QGroupBox("Progress & Log")
-        # ... progress bar and log area ...
         progress_log_layout = QVBoxLayout()
         self.progress_bar = QProgressBar()
         self.progress_bar.setTextVisible(True)
         self.progress_bar.setValue(0)
         self.log_area = QTextEdit()
         self.log_area.setReadOnly(True)
-        self.log_area.setLineWrapMode(QTextEdit.WidgetWidth)
+        self.log_area.setLineWrapMode(QTextEdit.WidgetWidth) # Changed line wrap mode
+        self.log_area.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Expanding) # Allow log to expand
         progress_log_layout.addWidget(self.progress_bar)
         progress_log_layout.addWidget(QLabel("Log:"))
         progress_log_layout.addWidget(self.log_area)
         progress_log_group.setLayout(progress_log_layout)
+        right_v_layout.addWidget(progress_log_group) # Add progress/log group to right column
 
+        # Add Right Layout to Top Horizontal Layout
+        top_h_layout.addLayout(right_v_layout, stretch=4) # Give right side slightly more space
+
+        # Add the top horizontal layout (containing left/right columns) to the main vertical layout
+        main_layout.addLayout(top_h_layout)
 
         # --- Control Buttons ---
-        # ... (no changes) ...
         control_layout = QHBoxLayout()
-        # ... start/stop buttons ...
         self.start_btn = QPushButton("Start Conversion")
-        self.start_btn.setStyleSheet("background-color: darkseagreen; color: black;")
+        self.start_btn.setStyleSheet("background-color: darkseagreen; color: black; padding: 5px;") # Added padding
         self.start_btn.clicked.connect(self.start_conversion)
         self.stop_btn = QPushButton("Stop Conversion")
-        self.stop_btn.setStyleSheet("background-color: indianred; color: black;")
+        self.stop_btn.setStyleSheet("background-color: indianred; color: black; padding: 5px;") # Added padding
         self.stop_btn.clicked.connect(self.stop_conversion)
         self.stop_btn.setEnabled(False)
         control_layout.addStretch()
@@ -265,30 +344,24 @@ class MainWindow(QMainWindow):
         control_layout.addWidget(self.stop_btn)
         control_layout.addStretch()
 
+        # Add control buttons layout to the main vertical layout (below the top split)
+        main_layout.addLayout(control_layout)
 
         # --- Status Bar ---
-        # ... (no changes) ...
         self.status_bar = QStatusBar()
         self.setStatusBar(self.status_bar)
         self.status_label = QLabel("Ready")
         self.status_bar.addWidget(self.status_label)
 
-
-        # --- Assemble Main Layout ---
-        main_layout.addWidget(file_group)
-        main_layout.addWidget(chapter_group)
-        hbox_params_output = QHBoxLayout()
-        hbox_params_output.addWidget(params_group, stretch=1)
-        hbox_params_output.addWidget(output_group, stretch=1)
-        main_layout.addLayout(hbox_params_output)
-        main_layout.addWidget(progress_log_group)
-        main_layout.addLayout(control_layout)
-
+        # Set the main widget and initial state
         self.setCentralWidget(main_widget)
-        self.set_controls_enabled(False) # Start disabled until backend check completes
+        self.set_controls_enabled(False) # Start disabled
+
+        # Set a more reasonable default size
+        self.setGeometry(100, 100, 1000, 700) # Wider, less tall default
 
     # --- Speaker Dropdown Logic ---
-
+    # ... (populate_speaker_dropdown, speaker_selection_changed - no changes needed) ...
     def populate_speaker_dropdown(self):
         """Clears and fills the speaker dropdown with default and saved profiles."""
         self.speaker_combo.blockSignals(True) # Prevent signals during population
@@ -312,10 +385,8 @@ class MainWindow(QMainWindow):
             except OSError as e:
                 self.append_log(f"Warning: Could not read speaker profiles directory '{profile_dir}': {e}")
 
-        # Sort profiles alphabetically by display name for consistency
         found_profiles.sort(key=lambda x: x['display'])
 
-        # Add sorted profiles to dropdown
         for profile in found_profiles:
             self.speaker_combo.addItem(profile['display'], userData=profile['path'])
 
@@ -324,14 +395,11 @@ class MainWindow(QMainWindow):
         if found_index != -1:
             self.speaker_combo.setCurrentIndex(found_index)
         else:
-            # If previous selection not found (e.g., deleted file), default to index 0
             self.speaker_combo.setCurrentIndex(0)
-            # Update the stored identifier to match the new selection
             self._active_speaker_identifier = self.speaker_combo.currentData()
 
         self.speaker_combo.blockSignals(False) # Re-enable signals
-        # Manually trigger update for the initial state
-        self.speaker_selection_changed()
+        self.speaker_selection_changed() # Manually trigger update
 
 
     def speaker_selection_changed(self):
@@ -350,13 +418,11 @@ class MainWindow(QMainWindow):
                 self.append_log(f"Selected speaker profile: {display_name}")
                 self.speaker_combo.setToolTip(f"Using saved profile: {selected_data}")
         else:
-             # Fallback, though should not happen with current logic
              self.append_log("Warning: No data associated with selected speaker. Reverting to default.")
-             self.reset_speaker_to_default() # Use the reset function
-
+             self.reset_speaker_to_default()
 
     # --- UI Control and Logging ---
-
+    # ... (update_status, append_log - no changes) ...
     def update_status(self, message):
         self.status_label.setText(message)
 
@@ -365,60 +431,73 @@ class MainWindow(QMainWindow):
         self.log_area.append(f"[{timestamp}] {message}")
         self.log_area.verticalScrollBar().setValue(self.log_area.verticalScrollBar().maximum())
 
-    def set_controls_enabled(self, enabled):
+    def update_mirostat_controls(self):
+        """Enable/disable Mirostat Tau and Eta based on checkbox."""
+        enabled = self.mirostat_check.isChecked()
+        self.mirostat_tau_spin.setEnabled(enabled)
+        self.mirostat_eta_spin.setEnabled(enabled)
+
+
+    def set_controls_enabled(self, enabled, force_not_converting=False):
         """Enable or disable input controls, considering backend status and conversion state."""
+        timestamp = datetime.now().strftime("%H:%M:%S.%f")[:-3]
+        is_converting = False
+        if not force_not_converting:
+             is_converting = self.thread is not None and self.thread.isRunning()
+        elif force_not_converting:
+             is_converting = False
 
-        # Determine current state more reliably
-        # Check if a thread object exists AND if it is currently running
-        is_converting = self.thread is not None and self.thread.isRunning()
         backend_ok = self.status_label.text() != "ERROR: outeTTS backend failed to load!"
+        # print(f"[{timestamp}] set_controls_enabled(enabled={enabled}, force_not_converting={force_not_converting}), is_converting={is_converting}, backend_ok={backend_ok}")
 
-        # --- Determine effective enable state for most controls ---
-        # Most controls should be enabled if:
-        # - The overall 'enabled' flag is True (meaning not currently processing start/stop)
-        # - AND the backend is okay
-        # - AND it's not actively converting right now
         effective_enabled_for_inputs = enabled and backend_ok and not is_converting
 
         self.select_epub_btn.setEnabled(effective_enabled_for_inputs)
         self.chapter_list.setEnabled(effective_enabled_for_inputs)
         self.speaker_combo.setEnabled(effective_enabled_for_inputs)
         self.create_speaker_btn.setEnabled(effective_enabled_for_inputs)
-
+        # Chapter list buttons
         buttons_layout_item = self.chapter_list.parent().layout().itemAt(1)
-        if buttons_layout_item:
-            buttons_layout = buttons_layout_item.layout()
-            if buttons_layout:
-                for i in range(buttons_layout.count()):
-                    widget_item = buttons_layout.itemAt(i)
-                    if widget_item and widget_item.widget():
-                        widget_item.widget().setEnabled(effective_enabled_for_inputs)
+        if buttons_layout_item and buttons_layout_item.layout():
+             buttons_layout = buttons_layout_item.layout()
+             for i in range(buttons_layout.count()):
+                  widget_item = buttons_layout.itemAt(i)
+                  if widget_item and widget_item.widget():
+                       widget_item.widget().setEnabled(effective_enabled_for_inputs)
 
+        # Sampler controls
         self.temp_spin.setEnabled(effective_enabled_for_inputs)
+        self.rep_penalty_spin.setEnabled(effective_enabled_for_inputs)
+        self.top_k_spin.setEnabled(effective_enabled_for_inputs)
+        self.top_p_spin.setEnabled(effective_enabled_for_inputs)
+        self.min_p_spin.setEnabled(effective_enabled_for_inputs)
+        self.mirostat_check.setEnabled(effective_enabled_for_inputs)
+        # Mirostat Tau/Eta enabled state depends on both global enable AND checkbox state
+        mirostat_sub_enabled = effective_enabled_for_inputs and self.mirostat_check.isChecked()
+        self.mirostat_tau_spin.setEnabled(mirostat_sub_enabled)
+        self.mirostat_eta_spin.setEnabled(mirostat_sub_enabled)
+
         self.select_output_btn.setEnabled(effective_enabled_for_inputs)
 
-        # --- Special handling for Start/Stop buttons ---
-        # Start Button: Enabled only if backend is OK AND we are NOT converting
-        self.start_btn.setEnabled(backend_ok and not is_converting)
-        # Stop Button: Enabled only if backend is OK AND we ARE converting
-        self.stop_btn.setEnabled(backend_ok and is_converting)
+        # Start/Stop buttons
+        start_enabled = backend_ok and not is_converting
+        stop_enabled = backend_ok and is_converting
+        self.start_btn.setEnabled(start_enabled)
+        self.stop_btn.setEnabled(stop_enabled)
+        # print(f"[{timestamp}]   -> Start Button Enabled: {start_enabled}, Stop Button Enabled: {stop_enabled}")
 
-        # --- Update Start Button Text ---
-        # This needs to reflect the state accurately
-        if not backend_ok:
-            self.start_btn.setText("Backend Error")
-        elif is_converting:
-            self.start_btn.setText("Converting...")
-        else: # Not converting and backend is OK
-            self.start_btn.setText("Start Conversion")
-
+        start_text = ""
+        if not backend_ok: start_text = "Backend Error"
+        elif is_converting: start_text = "Converting..."
+        else: start_text = "Start Conversion"
+        self.start_btn.setText(start_text)
+        # print(f"[{timestamp}]   -> Start Button Text: '{start_text}'")
 
     # --- File/Directory Selection ---
+    # ... (select_epub, select_output - no changes) ...
     def select_epub(self):
-        # ... (no changes) ...
         path, _ = QFileDialog.getOpenFileName(self, "Select EPUB file", "", "EPUB files (*.epub)")
         if path:
-             #... (update label, load chapters) ...
             self.current_epub_path = path
             base_name = os.path.basename(path)
             self.file_label.setText(base_name)
@@ -430,11 +509,9 @@ class MainWindow(QMainWindow):
             self.load_chapters(path)
 
     def select_output(self):
-        # ... (no changes) ...
         start_dir = os.path.dirname(self.current_epub_path) if self.current_epub_path else ""
         path = QFileDialog.getExistingDirectory(self, "Select Output Directory", start_dir)
         if path:
-             #... (update label) ...
             self.current_output_dir = path
             self.output_label.setText(f"Output to: {path}")
             self.output_label.setToolTip(path)
@@ -442,6 +519,7 @@ class MainWindow(QMainWindow):
 
 
     # --- Speaker Creation/Saving ---
+    # ... (create_speaker_from_audio, save_speaker_profile, reset_speaker_to_default - no changes needed) ...
     def create_speaker_from_audio(self):
         audio_filter = "Audio Files (*.wav *.mp3 *.flac *.ogg);;All Files (*)"
         path, _ = QFileDialog.getOpenFileName(self, "Select Audio File for Speaker Profile", "", audio_filter)
@@ -451,7 +529,7 @@ class MainWindow(QMainWindow):
         self.append_log(f"Attempting to create speaker profile from: {path}")
         QApplication.processEvents()
 
-        temp_speaker_object = None # Store the object temporarily
+        temp_speaker_object = None
 
         try:
             interface = epub_to_speech_oute.get_outeTTS_interface()
@@ -465,28 +543,21 @@ class MainWindow(QMainWindow):
             self.append_log(f"Successfully created speaker profile object from {os.path.basename(path)}.")
             self.update_status("Custom speaker created (unsaved).")
 
-            # Ask user if they want to save this profile
             reply = QMessageBox.question(self, "Save Speaker Profile?",
                                          "Speaker profile created successfully.\n\n"
                                          "Do you want to save this profile as a .json file to the list?",
                                          QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
-                                         QMessageBox.StandardButton.Yes) # Default to Yes
+                                         QMessageBox.StandardButton.Yes)
 
             if reply == QMessageBox.StandardButton.Yes:
                 self.save_speaker_profile(temp_speaker_object, os.path.splitext(os.path.basename(path))[0])
             else:
-                # If not saved, keep the object temporarily active but don't add to list
-                self._active_speaker_identifier = temp_speaker_object # Use the object directly
-                # Maybe add a temporary item to the dropdown? Or just leave it selected internally.
-                # For simplicity, we won't add a temp item. User can convert with it once.
+                self._active_speaker_identifier = temp_speaker_object
                 self.append_log("Using newly created speaker (unsaved) for next conversion.")
                 self.speaker_combo.setToolTip(f"Using unsaved speaker from {os.path.basename(path)}")
-                # Find default and reselect it visually to avoid confusion? Or add a temp item?
-                # Let's find default and select it visually, but keep the object internally
                 default_index = self.speaker_combo.findData(epub_to_speech_oute.DEFAULT_SPEAKER)
                 if default_index != -1:
                     self.speaker_combo.setCurrentIndex(default_index)
-
 
         except Exception as e:
             self.set_controls_enabled(True)
@@ -495,16 +566,12 @@ class MainWindow(QMainWindow):
             QMessageBox.critical(self, "Speaker Creation Error", f"Failed to create speaker profile:\n{e}")
 
     def save_speaker_profile(self, speaker_object, suggested_name="custom_speaker"):
-        """Saves the speaker object to the designated profile directory."""
         profile_dir = epub_to_speech_oute.SPEAKER_PROFILE_DIR
-        # Ensure directory exists (should have been created at startup)
         os.makedirs(profile_dir, exist_ok=True)
 
-        # Clean suggested name for filename
         safe_suggested_name = re.sub(r'[^\w\-]+', '_', suggested_name)
         if not safe_suggested_name: safe_suggested_name = "custom_speaker"
 
-        # Loop to find a unique filename
         counter = 0
         save_name_base = safe_suggested_name
         while True:
@@ -514,23 +581,17 @@ class MainWindow(QMainWindow):
                  break
              counter += 1
              safe_suggested_name = f"{save_name_base}_{counter}"
-             if counter > 100: # Safety break
+             if counter > 100:
                  self.append_log("Error: Could not find a unique filename to save speaker profile.")
                  QMessageBox.warning(self, "Save Error", "Could not determine a unique filename in the speaker_profiles directory.")
                  return
 
-
-        # Ask user to confirm/edit filename (optional but good UX)
         confirmed_save_path, ok = QFileDialog.getSaveFileName(
-            self,
-            "Confirm Save Speaker Profile",
-            save_path, # Pre-populate with suggested unique path
-            "JSON Files (*.json)"
+            self, "Confirm Save Speaker Profile", save_path, "JSON Files (*.json)"
         )
 
         if not ok or not confirmed_save_path:
             self.append_log("Speaker profile saving cancelled by user.")
-            # Keep the unsaved profile active temporarily?
             self._active_speaker_identifier = speaker_object
             self.append_log("Using newly created speaker (unsaved) for next conversion.")
             self.speaker_combo.setToolTip(f"Using unsaved speaker from temporary object")
@@ -538,7 +599,6 @@ class MainWindow(QMainWindow):
             if default_index != -1: self.speaker_combo.setCurrentIndex(default_index)
             return
 
-        # Ensure final path ends with .json
         if not confirmed_save_path.lower().endswith(".json"):
             confirmed_save_path += ".json"
 
@@ -550,30 +610,24 @@ class MainWindow(QMainWindow):
             self.append_log(f"Speaker profile saved successfully to: {confirmed_save_path}")
             self.update_status("Speaker profile saved.")
 
-            # Refresh the dropdown and select the newly saved profile
-            self._active_speaker_identifier = confirmed_save_path # Update identifier to path
-            self.populate_speaker_dropdown() # This will re-read the dir and select it
+            self._active_speaker_identifier = confirmed_save_path
+            self.populate_speaker_dropdown()
 
         except Exception as e:
              self.append_log(f"❌ Error saving speaker profile: {e}")
              self.update_status("Error saving speaker profile.")
              QMessageBox.critical(self, "Save Error", f"Failed to save speaker profile:\n{e}")
 
-
     def reset_speaker_to_default(self):
-        """Resets the active speaker to the default by selecting it in the dropdown."""
-        # Find the default item and set the dropdown's index
         default_name = epub_to_speech_oute.DEFAULT_SPEAKER
         default_index = self.speaker_combo.findData(default_name)
         if default_index != -1:
             self.speaker_combo.setCurrentIndex(default_index)
-            # speaker_selection_changed will be triggered automatically if index changed
         else:
             self.append_log("Warning: Could not find default speaker in dropdown to reset.")
-        # Explicitly log and update status just in case index didn't change
         self.append_log(f"Reset speaker to default: {default_name}")
         self.update_status("Speaker reset to default.")
-        self._active_speaker_identifier = default_name # Ensure internal state matches
+        self._active_speaker_identifier = default_name
 
 
     # --- Chapter Handling ---
@@ -634,7 +688,7 @@ class MainWindow(QMainWindow):
 
     # --- Conversion Process ---
     def start_conversion(self):
-        # ... (checks remain the same) ...
+        # Basic checks
         if not self.current_epub_path:
             QMessageBox.warning(self, "Error", "Please select an EPUB file first.")
             return
@@ -649,26 +703,49 @@ class MainWindow(QMainWindow):
 
         self.reset_chapter_highlight()
 
-        # Use the currently selected speaker identifier from the dropdown/internal state
-        params = {
-            'epub_path': self.current_epub_path,
-            'output_dir': self.current_output_dir,
-            'temperature': self.temp_spin.value(),
-            'selected_chapter_indices': selected_chapter_indices,
-            'speaker_profile': self._active_speaker_identifier # Pass the active identifier (str name/path or object)
+        # --- Collect Sampler Options ---
+        sampler_options = {
+            "temperature": self.temp_spin.value(),
+            "repetition_penalty": self.rep_penalty_spin.value(),
+            "top_k": self.top_k_spin.value(),
+            "top_p": self.top_p_spin.value(),
+            "min_p": self.min_p_spin.value(),
+            "mirostat": self.mirostat_check.isChecked(),
+            "mirostat_tau": self.mirostat_tau_spin.value(),
+            "mirostat_eta": self.mirostat_eta_spin.value(),
         }
 
-        # ... (rest of start_conversion: logging, disable controls, create worker/thread, connect signals, start thread) ...
+        # Create worker parameters dictionary
+        worker_params = {
+            'epub_path': self.current_epub_path,
+            'output_dir': self.current_output_dir,
+            'selected_chapter_indices': selected_chapter_indices,
+            'speaker_profile': self._active_speaker_identifier,
+            'sampler_options': sampler_options # Pass the collected options
+        }
+
+        # Log parameters being used
         self.append_log("="*30 + " Starting Conversion " + "="*30)
+        self.append_log(f"  EPUB: {os.path.basename(self.current_epub_path)}")
+        self.append_log(f"  Output Dir: {self.current_output_dir or 'Default'}")
+        self.append_log(f"  Speaker: {self.speaker_combo.currentText()} ({'Path/Obj' if isinstance(self._active_speaker_identifier, str) else 'Object'})")
+        self.append_log(f"  Chapters: {len(selected_chapter_indices)} selected")
+        self.append_log(f"  Sampler Options:")
+        for key, value in sampler_options.items():
+            self.append_log(f"    {key}: {value}")
+        self.append_log("-" * 70)
+
+
         self.update_status("Starting conversion...")
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat("Starting...")
         self.progress_bar.setStyleSheet("")
 
-        self.set_controls_enabled(False) # Disable controls
+        self.set_controls_enabled(False)
 
+        # Create and start worker thread
         self.thread = QThread(self)
-        self.worker = ConversionWorker(**params)
+        self.worker = ConversionWorker(**worker_params) # Unpack the params dict
         self.worker.moveToThread(self.thread)
 
         # Connect signals
@@ -679,7 +756,7 @@ class MainWindow(QMainWindow):
         self.worker.overwrite_required.connect(self.handle_overwrite_request_dialog)
 
         self.thread.started.connect(self.worker.run)
-        self.thread.finished.connect(self.thread_cleanup)
+        self.thread.finished.connect(self.thread_cleanup) # Ensure cleanup connection
 
         self.thread.start()
 
@@ -693,10 +770,11 @@ class MainWindow(QMainWindow):
         if self.worker and self.thread and self.thread.isRunning():
             self.update_status("Stopping conversion...")
             self.append_log("Attempting to stop the conversion...")
-            self.stop_btn.setEnabled(False)
+            self.stop_btn.setEnabled(False) # Disable immediately
             self.worker.stop()
 
     def conversion_finished(self, success, message):
+        # This runs in the main thread
         if success:
             self.update_status("Conversion completed successfully.")
             self.append_log(f"✅ {'='*30} Conversion Finished: {message} {'='*30}")
@@ -714,17 +792,28 @@ class MainWindow(QMainWindow):
                 self.progress_bar.setStyleSheet("QProgressBar::chunk { background-color: indianred; }")
                 QMessageBox.critical(self, "Conversion Error", f"An error occurred during conversion:\n{message}")
 
+        # Crucially, reset UI state AFTER thread/worker cleanup has been *scheduled*
+        # The actual cleanup happens when the event loop processes deleteLater
         self.reset_ui_after_conversion()
 
+
     def reset_ui_after_conversion(self):
-         self.set_controls_enabled(True)
+         """Resets UI elements after conversion finishes, stops, or errors."""
+         # print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] reset_ui_after_conversion called")
          self.reset_chapter_highlight()
+         # Force UI update assuming conversion is definitely over
+         # print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}]   Calling set_controls_enabled(True, force_not_converting=True)")
+         self.set_controls_enabled(True, force_not_converting=True)
+
 
     def thread_cleanup(self):
-         if self.worker: self.worker.deleteLater()
-         if self.thread: self.thread.deleteLater()
+         """Clean up thread and worker objects."""
+         # print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}] thread_cleanup called")
+         # deleteLater is handled by finished signal connection or event loop
          self.worker = None
          self.thread = None
+         # print(f"[{datetime.now().strftime('%H:%M:%S.%f')[:-3]}]   Worker and Thread references set to None")
+
 
     def update_progress(self, current_chap_num, total_chapters, chapter_title):
         self.progress_bar.setMaximum(total_chapters)
@@ -747,10 +836,15 @@ class MainWindow(QMainWindow):
 
     def reset_chapter_highlight(self):
          if self.highlighted_chapter_item:
-            self.highlighted_chapter_item.setSelected(False)
+            try:
+                self.highlighted_chapter_item.setSelected(False)
+            except RuntimeError: # Item might have been deleted if EPUB reloaded
+                pass
             self.highlighted_chapter_item = None
 
+
     def handle_overwrite_request_dialog(self, output_wav, output_m4b):
+        # This slot runs in the main thread, called by signal from worker
         if not self.worker: return
         files_exist = []
         if os.path.exists(output_wav): files_exist.append(os.path.basename(output_wav))
@@ -763,6 +857,7 @@ class MainWindow(QMainWindow):
             QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
             QMessageBox.StandardButton.No
         )
+        # Send response back to worker (worker is waiting in its handle_overwrite_request)
         if self.worker:
              self.worker.overwrite_response = (reply == QMessageBox.StandardButton.Yes)
 
@@ -775,8 +870,11 @@ class MainWindow(QMainWindow):
             if reply == QMessageBox.StandardButton.Yes:
                 self.append_log("Exiting application - stopping active conversion.")
                 self.stop_conversion()
+                # Give thread time to potentially finish stopping
                 if self.thread:
-                    if not self.thread.wait(3000): self.append_log("Warning: Worker thread did not finish stopping gracefully.")
+                     # Wait briefly, but don't block excessively on exit
+                    if not self.thread.wait(1500):
+                        self.append_log("Warning: Worker thread did not finish stopping quickly on exit.")
                 event.accept()
             else:
                 event.ignore()
@@ -786,17 +884,21 @@ class MainWindow(QMainWindow):
 
 # --- Main Execution ---
 if __name__ == "__main__":
-    # ... (keep optional High DPI and Theme) ...
+    # Optional High DPI scaling
+    # QApplication.setAttribute(Qt.AA_EnableHighDpiScaling)
+    # QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps)
+
     app = QApplication(sys.argv)
 
+    # --- Dark Theme ---
     app.setStyle("Fusion")
-    # ... (dark theme palette code) ...
     dark_palette = QPalette()
+    # ... (palette colors - unchanged) ...
     dark_palette.setColor(QPalette.Window, QColor(53, 53, 53))
     dark_palette.setColor(QPalette.WindowText, Qt.white)
     dark_palette.setColor(QPalette.Base, QColor(35, 35, 35))
     dark_palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-    dark_palette.setColor(QPalette.ToolTipBase, Qt.white)
+    dark_palette.setColor(QPalette.ToolTipBase, QColor(35, 35, 35)) # Darker tooltips
     dark_palette.setColor(QPalette.ToolTipText, Qt.white)
     dark_palette.setColor(QPalette.Text, Qt.white)
     dark_palette.setColor(QPalette.Button, QColor(53, 53, 53))
@@ -804,18 +906,26 @@ if __name__ == "__main__":
     dark_palette.setColor(QPalette.BrightText, Qt.red)
     dark_palette.setColor(QPalette.Link, QColor(42, 130, 218))
     dark_palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-    dark_palette.setColor(QPalette.HighlightedText, Qt.black)
-    dark_palette.setColor(QPalette.Disabled, QPalette.Text, QColor(127, 127, 127))
-    dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, QColor(127, 127, 127))
+    dark_palette.setColor(QPalette.HighlightedText, QColor(230, 230, 230)) # Lighter highlighted text
+    text_disabled_color = QColor(127, 127, 127)
+    button_disabled_color = QColor(80, 80, 80) # Darker disabled button
+    dark_palette.setColor(QPalette.Disabled, QPalette.Text, text_disabled_color)
+    dark_palette.setColor(QPalette.Disabled, QPalette.WindowText, text_disabled_color)
+    dark_palette.setColor(QPalette.Disabled, QPalette.ButtonText, text_disabled_color)
+    dark_palette.setColor(QPalette.Disabled, QPalette.Base, button_disabled_color)
+    dark_palette.setColor(QPalette.Disabled, QPalette.Button, button_disabled_color)
+    dark_palette.setColor(QPalette.Disabled, QPalette.Highlight, QColor(80, 80, 80))
+
     app.setPalette(dark_palette)
     app.setStyleSheet("QToolTip { color: #ffffff; background-color: #2a82da; border: 1px solid white; }")
-
+    # --- End Dark Theme ---
 
     if 'epub_to_speech_oute' in sys.modules:
          window = MainWindow()
          window.show()
          sys.exit(app.exec())
     else:
-         sys.exit(1) # Error message shown during import failure
+         # Error message already shown during import failure
+         sys.exit(1)
 
 # --- END OF FILE epub_to_speech_oute_ui.py ---
